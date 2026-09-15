@@ -1,0 +1,106 @@
+Süperkavitasyon Geçiş Fazı 6-DOF Simülasyon Aracı — Uygulama Planı
+Bağlam (Context)
+
+Amaç: yapay süperkavitasyon başlangıcı ile tam gelişmiş süperkavitasyon arasındaki geçiş fazında, su altı aracının 6 serbestlik dereceli (6-DOF) dinamiğini, literatürde yerleşik ampirik yöntemlerle (Logvinovich kavite genişleme/bağımsızlık ilkesi, Semenenko kavitatör/kanat/planing kuvvet formülleri) zaman alanında simüle eden, "Simulink benzeri" modüler bir Python aracı kurmak.
+
+Bu görevi 3 uzman alt-agent rolüyle (Hidrodinamik Tasarımcı, Modelleme Simülasyoncu, Kontrolcü/Doğrulayıcı) geliştireceğiz — kullanıcının açık isteği bu. Roller Claude Code'un Agent aracı ile sırayla (gerekirse geri-besleme döngüsüyle) çağrılacak; bu iş bölümü teslim edilecek aracın çalışma zamanı mimarisi değil, benim (Claude Code) geliştirme sürecimin organizasyonu.
+
+supercavitation_gui_LIVE_v10.py (~3900 satır, Türkçe Tkinter+Matplotlib canlı-ayarlanabilir kuvvet/geometri hesaplayıcı) ve Supercavitation.txt (durum notları + Case 1 kalibrasyon verisi). İncelendi: gerçek bir 6-DOF entegratör değil — pitch açısı (alpha_aoa) bir durum değil, kullanıcı girdisi; θ/q/ψ/r hiç entegre edilmiyor; V ve x düz Euler ile ilerletiliyor. Yani planlanan 6-DOF katı-cisim dinamiği işi gerçek ve ek bir iştir, tekrar değil. Kullanıcı kararı: bu dosya sadece referans olarak kullanılacak (kalibre denklemler, 6 alternatif kavite geometri modeli, Case 1 regresyon noktası: V=40 m/s, α=-1°, δc=+2°, fin trim=-0.80° → F_drag=5764N, Fz=-2109N, M=3344N·m) — mimari olarak üzerine inşa edilmeyecek (monolitik, GUI'ye bağlı, gerçek 6-DOF yok).
+
+Teslimat: C:\Users\oguz.demir\Desktop\Supercavity altında, mevcut legacy dosyalarla aynı klasörde ama ayrı bir src/ mimarisi olarak yeni, parametrik, config-dosyası ile çalıştırılan bir simülasyon aracı. Config dosyasında tanımlanan her farklı ilklendirme senaryosu (V0, derinlik, kavite başlangıç durumu, kontrol girdi profili vb.) ayrı bir koşum (run) olarak çalıştırılır ve kendine ait zaman-serisi grafik/tablo üretir — bu, tek bir koşumun içindeki zamana bağlı entegrasyondan (aşağıya bkz.) farklı bir kavramdır: iki ayrı koşum birbirinden bağımsız başlar, ama tek bir koşumun kendi içinde durum hiçbir zaman sıfırlanmaz/başa dönmez.
+
+Doğruluk felsefesi (kullanıcı geri bildirimi): Bu ampirik formüllerle %100 analitik doğruluk hedeflenmiyor — hedef en optimum/en makul sonuç. Örn. sıfır batma/sıfır açı gibi sınır koşullarında kuvvetlerin tam olarak analitik 0 olması şart değil; kavite zarfı büyüdükçe zamana bağlı olarak ihmal edilebilir düzeyde sıfıra yakınsaması yeterli. Bu, tüm immersion-bazlı (kanat, planing) kuvvet formülleri için geçerli bir tasarım kriteri. Bu felsefeyi uygulamak için 4. bir agent rolü — Optimizasyoncu — eklendi (aşağıda).
+
+Yaklaşım
+Durum vektörü ve hareket denklemleri
+
+14 durumlu, tek entegre edilen durum vektörü (kullanıcı onayıyla 12'den 14'e genişletildi — kavite olgunlaşma gecikmesi gerçek bir ODE durumu olarak modellenecek, algebrik/anlık hesap değil):
+
+x = [u, v, w, p, q, r, φ, θ, ψ, X, Y, Z, Lc, pc]
+İlk 6: gövde-eksenli lineer/açısal hızlar (girdi/durum — kullanıcının istediği gibi)
+φ,θ,ψ: Euler açıları (kuaterniyon değil — bu araçlar sınırlı yunuslama zarfında çalışır, gimbal kilidi gerçekçi risk değil; |θ| ~80-85°'ye yaklaşırsa uyarı verilecek)
+X,Y,Z: eylemsiz çerçevede konum (yörünge/derinlik çıktısı için)
+Lc, pc: kavite uzunluğu ve kavite basıncı — anlık σ'dan cebirsel değil, gerçek gecikme dinamiğiyle (dLc/dt = (Lc_ss - Lc)/τ tipi) entegre edilen durumlar. Bu, geçiş fazının fiziksel olarak doğru simülasyonu için zorunlu (kullanıcı onayı: ventilasyon/gaz enjeksiyon modeli dahil edilecek).
+
+Denklem formu: M_RB·v̇ + C_RB(v)·v = τ_hydro + τ_gravity (Fossen/deniz aracı konvansiyonu), kuvvetler gövde çerçevesinde hesaplanır, yerçekimi Euler açılarıyla çözülür. Eklenmiş kütle (added mass) sadece burun/kavitatör bölgesi ve ıslak kanat/kuyruk yamaları için küçük sabit terimler olarak constants.py'de tutulacak (tüm gövde kavite içinde olduğu için tam potansiyel-akış tensörü gereksiz).
+
+Roll ekseni: kullanıcı kararı — pasif sönümlü, aktif kontrol yok. p durumu minimal doğrusal sönümleme terimiyle modellenecek (nümerik sürüklenmeyi önlemek için), 4 kanat sadece pitch (elevator çifti) ve yaw (rudder çifti) için kullanılacak.
+
+Yerçekimi/kaldırma kuvveti: net ağırlık + ıslak kesitlerin kısmi kaldırma kuvveti (zaten kanat batma/planing için ıslak alan hesabı gerekiyor, ek maliyeti düşük, düşük hız/erken geçiş fazında doğruluğu artırıyor).
+
+Kontrol girdilerinin zamana bağlılığı ve zarf/durum sürekliliği (kullanıcı geri bildirimi)
+
+Bu, mimarinin en kritik davranış kuralı — açıkça yazılmalı çünkü yanlış anlaşılmaya çok müsait:
+
+Bir koşum (run) tek, kesintisiz bir zaman entegrasyonudur: t=0'dan t=t_son'a kadar, sabit dt (ör. gerçek bir otopilotun güncelleme hızını temsilen 1 ms mertebesinde, config'den ayarlanabilir) ile RK4 adımları atılır.
+Her adımda: kontrol girdileri δc(t,x), δe(t,x), δr(t,x), Cq(t,x) — t'nin (ve istenirse mevcut durum x'in) bir fonksiyonu olarak değerlendirilir (açık-çevrim zaman-programı VEYA kapalı-çevrim geri-besleme kuralı; ikisini de destekleyecek tek bir ControlInputBlock arayüzü). Bu anlık girdi değerleri, o adımdaki kavitatör/kanat/planing kuvvetlerini hesaplamak için kullanılır.
+Kavite/zarf durumları (Lc, pc) ve tüm diğer 12 durum, girdi her değiştiğinde SIFIRLANMAZ. Onlar gerçek ODE durumlarıdır — bir önceki adımın değerinden, o anki girdinin ürettiği hedef değere doğru (gecikme zaman sabiti τ ile) entegre edilerek ilerler: Lc(t+dt) = Lc(t) + dt·(Lc_ss(σ_target(t)) - Lc(t))/τ (RK4 ile daha yüksek mertebeden). Yani girdi δc veya Cq aniden değişse bile, zarf o anki büyüklüğünden devam ederek yeni hedefe doğru sürünür — başa/sıfıra dönmez. Bu, "geçiş fazı" simülasyonunun bütün amacı: zarfın zamanla nasıl olgunlaştığını yakalamak.
+Bu, RK4 tek entegratörünün doğal davranışıdır (§ "Simulink benzeri blok-diyagram motoru") — ayrıca bir "reset" veya "yeniden başlatma" mekanizması eklenmeyecek; olay tespiti (immersion geçişi, σ eşiği) sadece gözlemci/etiketleyicidir, state'i sıfırlamaz (bkz. ilgili bölüm).
+Buna karşılık, ayrı config dosyaları/farklı ilklendirme koşulları gerçekten bağımsız koşumlardır: her biri kendi t=0 başlangıç durumundan başlar (yukarıdaki Bağlam bölümünde açıklanan "her senaryo kendi grafiğini üretir" ifadesi budur) — bu, tek bir koşum içindeki sürekliliği etkilemez.
+Kuvvet modeli bileşenleri (Hidrodinamik Tasarımcı agent'ın kapsamı)
+Kavite geometrisi — Logvinovich bağımsızlık ilkesi; legacy dosyadaki 6 alternatif formülün (Garabedian/Savchenko/Semenenko/May/Vasin-Serebryakov/Logvinovich) çapraz doğrulama için referans alınması, model seçilebilir (pluggable) tutulması.
+Ventilasyon/gaz enjeksiyon modeli — hibrit doğal+ventile σ (Epshtein twin-vortex sızıntı, Cq = Q/(V·Dn²), Paryshev kararlılık parametresi), pc durumunu süren hedef-σ ilişkisi. Config'de gaz debisi (Cq) girdi olarak eklenecek.
+Kavitatör kuvveti/momenti — sürükleme Cx0·(1+σ), hücum açısına göre kaldırma (Logvinovich/Semenenko ampirik formülleri).
+4 kanat kuvveti (2 elevator + 2 rudder, ayrı ayrı) — her kanat için batma oranına (h/s) bağlı ampirik indirgeme faktörü (Semenenko/Vasin tipi): tam kavite içindeyse ~sıfır kuvvet, kavite duvarını deliyorsa kısmi ıslak kaldırma formülü. Lateral eksen (rudder, sideslip+δr) formülleri de aynı titizlikte, pitch düzlemiyle simetrik türetilecek.
+Planing kuvveti — kuyruk/gövde kavite duvarını deldiğinde oluşan klasik geri-getirici/sönümleyici kuvvet (tail-slap mekanizması), legacy dosyadaki Dzielski-Kurdila tipi transom planing modeli referans alınabilir.
+Tüm formüller: σ→0 ve V→0 tekilliklerine karşı constants.py'de tanımlı tek SIGMA_MIN/V_MIN ile tutarlı kırpma; SI birim + radyan zorunlu (derece sadece config/plot sınırında); tek bir gövde-çerçevesi işaret konvansiyonu (x-ileri, y-sancak, z-aşağı) her fonksiyonun docstring'inde belirtilecek.
+Optimizasyon / kalibrasyon yaklaşımı (Optimizasyoncu agent'ın kapsamı)
+
+Ampirik formüllerin serbest sabitleri (legacy dosyadaki A_v, k_g, K_v_cone, cone_lift_gain, K_slender, CL_α_body benzeri kazançlar + yeni eklenen ventilasyon/immersion sabitleri) tek tek elle ayarlanmayacak; Optimizasyoncu agent bunları bir kalibrasyon problemi olarak ele alacak:
+
+Hedef fonksiyonu: legacy Case 1 regresyon noktasına (V=40 m/s, α=-1°, δc=+2° → F_drag=5764N, Fz=-2109N, M=3344N·m) ve Kontrolcü agent'ın ürettiği ek fiziksel-makullük kriterlerine (monotonluk: δe↑ ⇒ Fz/My aynı yönde↑; asimptotik davranış: immersion→0 iken kuvvet→ihmal edilebilir küçük değer, ani/keskin sıfırlama değil; süreklilik: batma geçişlerinde kuvvet eğrisinde sıçrama olmaması) karşı ağırlıklı bir en-küçük-kareler/scipy.optimize.least_squares problemi kurulacak.
+Serbest kazanç/sabitler için makul literatür-uyumlu üst-alt sınırlar tanımlanacak (kör optimizasyonla fiziksel anlamsız değerlere savrulmayı önlemek için).
+Çıktı: hydrodynamics/constants.py içindeki kalibre edilmiş sabit seti + kısa bir kalibrasyon raporu (hangi sabit hangi aralıkta, hedefe ne kadar yakınsandı, hangi kriterler toleransta kaldı).
+Bu adım Hidrodinamik Tasarımcı'nın formülleri teslim etmesinden sonra, Kontrolcü/Doğrulayıcı'nın ilk makullük taramasından önce veya birlikte çalışır (bkz. orkestrasyon sırası) — Kontrolcü'nün bulduğu makul-olmayan sonuçlar Optimizasyoncu'ya geri beslenip sabitler yeniden ayarlanabilir.
+"Simulink benzeri" blok-diyagram motoru (Modelleme Simülasyoncu agent'ın kapsamı)
+
+Hafif, bağımsız (bdsim gibi dış pakete bağımlı olmayan) özel bir çerçeve:
+
+Block taban sınıfı: cebirsel bloklar (kavitatör, kanatlar, planing) için step(t, inputs) -> outputs; durumlu bloklar (katı-cisim 12 durum, kavite 2 durum) için ode(t, x, inputs) -> xdot.
+ControlInputBlock: her adımda (t, x) -> (δc, δe, δr, Cq) üretir (açık-çevrim zaman-programı veya kapalı-çevrim geri-besleme kuralı — bkz. "Kontrol girdilerinin zamana bağlılığı" bölümü). Bu bloğun çıktısı doğrudan cebirsel kuvvet bloklarına ve cavity_state_derivative()'e girdi olur; kendisi durum taşımaz, sadece o anki t/x'e göre değerlendirilir.
+Simulator, iki durumlu bloğun türevlerini tek global xdot'ta birleştirip tek RK4 sabit-adım entegratörü ile ilerletir (adaptif solve_ivp(RK45) varsayılan olarak kullanılmayacak — batma-oranı geçişleri, hibrit σ anahtarlaması gibi kink'ler adaptif adım kontrolünü ya faydasız ya da adım-reddiyle yavaş kılar). dt, legacy dosyadaki yakınsama verisinden (dt=0.001 → <%0.15 hata) başlangıç değeri alınarak kavite/pc gecikme zaman sabitine göre ayarlanacak.
+Olay tespiti (events= veya sabit-adımda son-işlem sıfır-geçiş taraması) sadece gözlemci/etiketleyici olarak kullanılacak (ör. "kanat kaviteye girdi/çıktı", "σ inception eşiğini geçti") — grafik açıklamaları ve Kontrolcü agent'ın kontrolleri için, entegratörü durdurup yeniden başlatmak için değil.
+Modül/klasör mimarisi
+C:\Users\oguz.demir\Desktop\Supercavity
+├── Supercavitation.txt, supercavitation_gui_LIVE_v10.py   (mevcut, referans — dokunulmayacak)
+├── CLAUDE.md                                               (yeni proje dokümantasyonu)
+├── src/
+│   ├── hydrodynamics/          ← Hidrodinamik Tasarımcı agent
+│   │   ├── constants.py        (SI birimler, SIGMA_MIN, V_MIN, akışkan/araç sabitleri)
+│   │   ├── cavity.py           (kavite geometrisi + ventilasyon modeli + cavity_state_derivative() sözleşmesi)
+│   │   ├── cavitator.py
+│   │   ├── fins.py             (4 kanat, immersion-bazlı)
+│   │   └── planing.py
+│   ├── dynamics/                ← Modelleme Simülasyoncu agent
+│   │   ├── blocks.py           (Block taban sınıfı, global durum vektörü birleştirme)
+│   │   ├── rigid_body.py       (14 durumlu EOM, M_RB/C_RB, eklenmiş kütle, yerçekimi+kısmi kaldırma)
+│   │   ├── kinematics.py       (Euler açı hızı ve konum entegrasyonu)
+│   │   └── model.py            (blokları diyagrama bağlama)
+│   ├── simulation/
+│   │   ├── simulator.py        (sabit-adım RK4 sürücüsü, dt seçimi, gözlemci/olay loglama)
+│   │   └── run_simulation.py   (CLI giriş noktası: config oku → simüle et → postprocess çağır → outputs/<run_id>/'a config_used.py kopyala)
+│   └── postprocess/
+│       ├── plots.py            (hız/açı/yörünge/kuvvet-moment/σ(t)/Lc(t) zaman serisi grafikleri)
+│       └── tables.py           (özet tablo, CSV dışa aktarım)
+├── configs/
+│   └── example_config.py       (başlangıç koşulları: V0, derinlik, δc/δe/δr profilleri, Cq, araç parametreleri)
+├── validation/                  ← Kontrolcü/Doğrulayıcı agent
+│   ├── sanity_checks.py        (parametrik işaret/büyüklük kontrolleri, legacy Case 1 regresyon noktası, yakınsama/kararlılık taramaları)
+│   └── calibration.py          ← Optimizasyoncu agent (least_squares kalibrasyon, sınır/asimptotik davranış kriterleri, kalibrasyon raporu)
+└── outputs/
+    └── <run_id>/                (her koşum için grafik+tablo+config_used.py)
+
+Agent arayüz sözleşmesi (kritik): kavite durumu (Lc, pc) Tasarımcı ve Modelleyici agent'ları arasında kesişiyor. Tasarımcı, hydrodynamics/cavity.py içinde saf bir cavity_state_derivative(Lc, pc, V, sigma_target, params) -> (dLc_dt, dpc_dt) fonksiyonu teslim edecek; Modelleyici bu iki durumu global vektörde opak slot olarak taşıyacak, oran matematiğini asla yeniden yazmayacak.
+
+Agent orkestrasyonu (uygulama sırası)
+Hidrodinamik Tasarımcı agent → hydrodynamics/ tamamlanır (legacy dosya + Case 1 verisi referans olarak verilir, literatür atıflarıyla docstring'ler; serbest kazanç/sabitler constants.py'de açıkça isimlendirilip kalibre-edilebilir olarak işaretlenir).
+Modelleme Simülasyoncu agent → dynamics/, simulation/, postprocess/ tamamlanır; hydrodynamics/'i sadece fonksiyon arayüzü üzerinden tüketir.
+Optimizasyoncu agent → validation/calibration.py: serbest sabitleri Case 1 noktasına ve fiziksel-makullük kriterlerine (monotonluk, asimptotik sıfıra yakınsama, süreklilik) karşı least_squares ile kalibre eder, kalibrasyon raporu üretir, hydrodynamics/constants.py'yi güncel kalibre değerlerle günceller.
+Kontrolcü/Doğrulayıcı agent → validation/sanity_checks.py: işaret/büyüklük kontrolleri (ör. δe artışı → Fz ve My beklenen yönde artmalı → w,q buna göre güncellenmeli), decoupling kontrolü (saf elevator sapması ~sıfır yaw/roll momenti üretmeli), kalibre edilmiş Case 1 noktasına karşı regresyon, near-inception (küçük başlangıç kavitesi) senaryosu, NaN/ıraksama taraması. Makul olmayan bir sonuç bulunursa Optimizasyoncu'ya (sabit ayarı) veya Tasarımcı'ya (formül hatası) geri beslenir.
+Ben (ana thread) bulguları agent'lar arasında ileri-geri taşır, entegrasyonu tamamlar, örnek bir koşum çalıştırıp grafik/tablo üretir ve kullanıcıya raporlar.
+Doğrulama (Verification)
+python src\simulation\run_simulation.py --config configs\example_config.py çalıştırılır; hatasız tamamlanmalı, outputs\<run_id>\ altında grafikler (PNG) + tablo (CSV) + config_used.py üretmeli.
+python validation\calibration.py çalıştırılır; kalibrasyon raporu üretilir, Case 1 noktasına yakınsama toleransı (tam eşitlik değil, makul bağıl hata bandı) ve asimptotik/süreklilik kriterleri karşılanmalı.
+python validation\sanity_checks.py çalıştırılır; tüm işaret/büyüklük/decoupling kontrolleri ve kalibre Case 1 regresyon noktası (toleranslı, "en optimum" ilkesine göre — sınır koşullarında tam 0 değil ihmal edilebilir yakınsama beklenir) geçmeli.
+configs\example_config.py içinde en az 2 farklı başlangıç koşulu (ör. farklı V0, farklı δe) denenip her ikisinin de görsel olarak farklı zaman-serisi grafikleri ürettiği doğrulanır.
+Near-inception (küçük başlangıç Lc) ve düşük-V senaryosu ayrıca çalıştırılıp NaN/ıraksama olmadığı kontrol edilir.

@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+outputs/
+.claude/settings.local.json
+.idea/
+.vscode/
