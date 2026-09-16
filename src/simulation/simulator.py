@@ -144,6 +144,9 @@ class Simulator:
                 t_log.append(t)
                 x_log.append(x.copy())
                 u_log.append(u)
+                ctrl_log = getattr(self.controller, "log", None)
+                if ctrl_log:
+                    d = dict(d, **{f"ctrl_{key}": val for key, val in ctrl_log.items()})
                 d_log.append(d)
 
             if k == n_steps:
@@ -170,7 +173,8 @@ class Simulator:
             wall_time=time.perf_counter() - wall0,
             meta=dict(t_max=self.t_max, dt=self.dt, dt_control=self.dt_control,
                       log_every=self.log_every, locked_states=list(self.locked_states),
-                      fin_span=self.model.fin_span),
+                      fin_span=self.model.fin_span,
+                      vent_mode=getattr(self.model, "vent_mode", "Q")),
         )
 
 

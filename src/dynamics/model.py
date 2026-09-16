@@ -121,6 +121,8 @@ class VehicleModel:
                               False (varsayılan) → gecikmeli durum Lc/Dc ile
       legacy_exact            True → legacy rejim anahtarlamaları birebir; False (varsayılan)
                               → sürekli geçişler
+      gas_flow_ref_depth [m]  Q-mod: gaz debisinin ölçüldüğü derinlik (hidrostatik p_ref);
+                              gaz kavitede pc'ye genleşir. None (varsayılan) → legacy.
     Gövde orijini x_cg'dedir (kütle merkezi); x_cg_mass yok sayılır.
     """
 
@@ -165,6 +167,10 @@ class VehicleModel:
         self.K_Lc = _clip(p.get("K_Lc_factor", 1.0), 0.3, 2.0)
         self.A_v = _clip(p.get("A_v", A_V_DEFAULT), 0.005, 0.30)
         self.vent_mode = p.get("vent_mode", "Q")
+        # Q-mod: gaz debisinin ölçüldüğü derinlik [m] (None → legacy: kavite basıncında hacim)
+        ref_depth = p.get("gas_flow_ref_depth")
+        self.gas_p_ref = (None if ref_depth is None or self.vent_mode != "Q"
+                          else P_ATM + RHO * G * max(float(ref_depth), 0.0))
         self.tau_cav = float(p.get("cavity_tau", CAVITY_TAU))
         self.tau_pc = float(p.get("tau_pc", TAU_PC))
         self.k_dev = _clip(p.get("k_dev", K_DEV_DEFAULT), 0.0, 1.0)
@@ -199,6 +205,16 @@ class VehicleModel:
             return Q / (V * self.Dn ** 2)
         return 0.0
 
+    def cavity_derivative(self, Lc, Dc, pc, V, depth, gas_flow):
+        """(Cq, kavite türev sözlüğü) — model ve tahminci (control/estimator.py) ortak yolu."""
+        Cq = self.gas_coefficient(gas_flow, V)
+        cav = hcavity.cavity_state_derivative(
+            Lc, Dc, pc, V, self.ambient_pressure(depth), Cq, self.Dn, model=self.geom_model,
+            k_g=self.k_g, K_Dc=self.K_Dc, K_Lc=self.K_Lc, A_v=self.A_v,
+            tau_cav=self.tau_cav, tau_pc=self.tau_pc, smooth=self.smooth,
+            gas_p_ref=self.gas_p_ref)
+        return Cq, cav
+
     # ------------------------------------------------------------------
     def evaluate(self, t, x, u):
         """(x_dot, diag). diag: tanı büyüklükleri (legacy adlarıyla, yukarı +)."""
@@ -220,11 +236,7 @@ class VehicleModel:
             M[:] += np.cross(r, force)
 
         # ---- Kavite durumu ----
-        Cq = self.gas_coefficient(u.gas_flow, V)
-        cav = hcavity.cavity_state_derivative(
-            Lc, Dc, pc, V, p_inf, Cq, self.Dn, model=self.geom_model, k_g=self.k_g,
-            K_Dc=self.K_Dc, K_Lc=self.K_Lc, A_v=self.A_v,
-            tau_cav=self.tau_cav, tau_pc=self.tau_pc, smooth=self.smooth)
+        Cq, cav = self.cavity_derivative(Lc, Dc, pc, V, x[IDX_Z], u.gas_flow)
         s_raw = cav["sigma_raw"]
         sigma = cav["sigma"]
 

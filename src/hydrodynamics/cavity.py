@@ -270,7 +270,7 @@ def cavity_state_derivative(Lc: float, Dc: float, pc: float, V: float, p_inf: fl
                             k_g: float = K_G_CAVITY_DEFAULT, K_Dc: float = 1.0,
                             K_Lc: float = 1.0, A_v: float = A_V_DEFAULT,
                             tau_cav: float = CAVITY_TAU, tau_pc: float = TAU_PC,
-                            smooth: bool = False) -> dict:
+                            smooth: bool = False, gas_p_ref: float = None) -> dict:
     """
     Kavite durumlarının zaman türevi (legacy simulate() satır 547-651'in ODE formu).
 
@@ -285,6 +285,14 @@ def cavity_state_derivative(Lc: float, Dc: float, pc: float, V: float, p_inf: fl
 
     Durumlar girdi değişince sıfırlanmaz; sadece hedefe doğru gecikmeyle ilerler.
 
+    gas_p_ref [Pa]: None → legacy (Cq kavite basıncındaki hacim debisinden). Verilirse Cq_in,
+    p_ref basıncında ölçülmüş hacim debisinden hesaplanmıştır; gaz kavitede (izotermal)
+    pc'ye genleşir: Cq_eff = Cq_in·p_ref/pc. pc'nin kendisi Cq'ya bağlı olduğundan denge
+    (hedef) basıncında kapalı form çözülür:
+        pc_t = p∞ / (1 + ½ρV²·A_v/(Cq_in·p_ref)),   σ_vent = A_v·pc_t/(Cq_in·p_ref)
+    (gecikmeli pc durumu kullanılmaz → cebirsel döngü yok; başlangıçtaki pc = p_v'de
+    sonsuz genleşme olmaz).
+
     smooth=True: legacy σ = 1'de (Lc_ss, Dc_ss) ≈ (1.3 m, 0.29 m) → 0 sıçrıyor. Hedef
     boyutlar smoothstep((1 − σ)/SIGMA_ONSET_WIDTH) ile σ → 1'de sürekli 0'a indirilir
     (σ ≤ 1 − w'de legacy ile aynı).
@@ -296,7 +304,14 @@ def cavity_state_derivative(Lc: float, Dc: float, pc: float, V: float, p_inf: fl
     rho_v2 = RHO * V_safe * V_safe
 
     sigma_vapor = 2.0 * (p_inf - P_VAP) / rho_v2
-    sigma_vent = A_v / max(Cq_in, 1e-6) if Cq_in > 1e-9 else np.inf
+    if Cq_in <= 1e-9:
+        sigma_vent = np.inf
+    elif gas_p_ref is None:
+        sigma_vent = A_v / max(Cq_in, 1e-6)
+    else:
+        Cq_ref = max(Cq_in, 1e-6) * gas_p_ref
+        pc_vent = p_inf / (1.0 + 0.5 * rho_v2 * A_v / Cq_ref)
+        sigma_vent = A_v * pc_vent / Cq_ref
     sigma_hybrid = min(sigma_vapor, sigma_vent)
 
     pc_target = p_inf - 0.5 * rho_v2 * sigma_hybrid

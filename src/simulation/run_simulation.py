@@ -73,13 +73,15 @@ def initial_state(ic):
     )
 
 
-def build_controller(spec):
+def build_controller(spec, vehicle=None):
     spec = dict(spec or {})
     kind = spec.pop("type", "schedule")
     if kind == "schedule":
         return ScheduleController(**spec)
     if kind == "autopilot":
         from src.control.autopilot import AttitudeAutopilot
+        if spec.get("estimator") is not None:
+            spec.setdefault("vehicle", vehicle)
         return AttitudeAutopilot(**spec)
     raise ValueError(f"bilinmeyen kontrolcü tipi: {kind!r} ('schedule' | 'autopilot')")
 
@@ -93,7 +95,7 @@ def build_run(cfg, scenario):
     sim.update(scenario.get("simulation", {}))
 
     model = VehicleModel(vehicle)
-    controller = build_controller(scenario.get("control"))
+    controller = build_controller(scenario.get("control"), vehicle)
     simulator = Simulator(model, controller, t_max=sim["t_max"], dt=sim["dt"],
                           dt_control=sim["dt_control"], log_every=sim["log_every"],
                           locked_states=scenario.get("locked_states", ()))

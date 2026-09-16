@@ -6,6 +6,8 @@ src/dynamics/model.py testleri (düz script, exit 0 = geçti).
     Tolerans: |fark| ≤ max(%2·|legacy|, 1 N)  (moment için 1 N·m).
 (S) İşaret/ayrışma: δe sadece pitch, δr sadece yaw; kanat sönümleri; kavite
     denge noktasında türev ~0; kavitesiz/düşük hızda NaN yok.
+(G) Gaz debisi referans basıncı: kapalı form öz-tutarlılığı, legacy indirgemesi,
+    derinlik bağımlılığı.
 Çalıştır:  python test_model.py
 """
 
@@ -167,10 +169,47 @@ def test_cavity_equilibrium_and_robustness():
               f"u_dot={xdot[0]:.2f}")
 
 
+def test_gas_flow_reference():
+    print("\n(G) Gaz debisi referans basıncı (gas_flow_ref_depth)")
+    from src.hydrodynamics.constants import P_ATM, RHO, G
+    u = ControlInput(gas_flow=7500.0)
+    V, pc0 = 40.0, 50000.0
+    legacy = case1_model()
+    for depth_ref in (5.0, 20.0):
+        m = case1_model(gas_flow_ref_depth=depth_ref)
+        p_ref = P_ATM + RHO * G * depth_ref
+        for depth in (5.0, 10.0, 30.0):
+            Cq, d = m.cavity_derivative(1.0, 0.2, pc0, V, depth, u.gas_flow)
+            p_inf = m.ambient_pressure(depth)
+            # kapalı form: pc_t, gazın pc_t'ye genleşmiş Cq'suyla tutarlı olmalı
+            pc_t = p_inf - 0.5 * RHO * V ** 2 * d["sigma_vent"]
+            Cq_eff = Cq * p_ref / pc_t
+            ok = abs(d["sigma_vent"] - m.A_v / Cq_eff) < 1e-9 * d["sigma_vent"]
+            check(f"öz-tutarlılık: ref {depth_ref:.0f} m, derinlik {depth:.0f} m",
+                  ok, f"pc_t={pc_t / 1e3:.1f} kPa σ_vent={d['sigma_vent']:.4f}")
+    # referans basıncı kavite basıncına eşitse legacy ile aynı sonuç
+    m = case1_model(gas_flow_ref_depth=5.0)
+    Cq, d_new = m.cavity_derivative(1.0, 0.2, pc0, V, 10.0, u.gas_flow)
+    pc_t = m.ambient_pressure(10.0) - 0.5 * RHO * V ** 2 * d_new["sigma_vent"]
+    _, d_leg = legacy.cavity_derivative(1.0, 0.2, pc0, V, 10.0, u.gas_flow * m.gas_p_ref / pc_t)
+    check("legacy'ye indirgenir (Q_kavite = Q·p_ref/pc_t ile)",
+          abs(d_leg["sigma_vent"] - d_new["sigma_vent"]) < 1e-9, f"{d_new['sigma_vent']:.5f}")
+    s = [case1_model(gas_flow_ref_depth=5.0).cavity_derivative(1.0, 0.2, pc0, V, z, 7500.0)[1]["sigma_vent"]
+         for z in (5.0, 10.0, 20.0, 40.0)]
+    check("derinlik arttıkça σ_vent artar (aynı debi, daha kısa kavite)", np.all(np.diff(s) > 0),
+          " ".join(f"{v:.3f}" for v in s))
+    check("legacy mod: σ_vent derinlikten bağımsız",
+          len({round(legacy.cavity_derivative(1.0, 0.2, pc0, V, z, 7500.0)[1]["sigma_vent"], 12)
+               for z in (5.0, 20.0)}) == 1)
+    check("başlangıçtaki pc = p_v'den etkilenmez (hedef basınçla çözüm)",
+          m.cavity_derivative(0.0, 0.0, 2340.0, V, 10.0, 7500.0)[1]["sigma_vent"] == d_new["sigma_vent"])
+
+
 def main():
     test_static_regression()
     test_signs_and_decoupling()
     test_cavity_equilibrium_and_robustness()
+    test_gas_flow_reference()
     n_ok = sum(RESULTS)
     print(f"\n{n_ok}/{len(RESULTS)} kontrol geçti")
     return 0 if all(RESULTS) else 1

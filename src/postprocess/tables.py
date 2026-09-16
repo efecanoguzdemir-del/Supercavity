@@ -76,6 +76,12 @@ def summary_lines(result, name=""):
         ("F_planing [N]", d["F_planing"]), ("M_pitch [Nm]", d["M_body_1"]),
         ("N_yaw [Nm]", d["M_body_2"]),
     ]
+    if result.meta.get("vent_mode", "Q") == "Q":
+        rows.insert(0, ("gaz Q [L/s]", result.u["gas_flow"] / 60.0))
+    else:
+        rows.insert(0, ("gaz Cq [-]", result.u["gas_flow"]))
+    rows.insert(1, ("Cq [-]", d["Cq"]))
+    rows.insert(2, ("itki T [N]", result.u["thrust"]))
     for label, arr in rows:
         lines.append(f"{label:14s} {arr[0]:12.4g} {arr[-1]:12.4g} {np.min(arr):12.4g} {np.max(arr):12.4g}")
     lines += ["", "Olaylar:"]

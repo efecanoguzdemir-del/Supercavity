@@ -3,7 +3,7 @@ Zaman serisi grafikleri (matplotlib, Agg — ekran açmaz).
 
 Her koşum için PNG seti:
   01_hiz_akis.png     V, u/v/w, α/β
-  02_durus.png        φ/θ/ψ, p/q/r
+  02_durus.png        φ/θ/ψ (+ referanslar), p/q/r, derinlik (+ Z_ref), otopilot k_s ve η
   03_yorunge.png      X–derinlik, X–Y
   04_kavite.png       Lc, Dc (durum + hedef), σ, pc, örtülme
   05_kuvvetler.png    sürükleme bileşenleri, dikey bileşenler, gövde F, momentler
@@ -72,13 +72,29 @@ def make_all_plots(result, out_dir, title=""):
     _style(ax[2], "açı [deg]", result)
     files.append(_save(fig, out_dir, "01_hiz_akis.png", [ax[-1]]))
 
-    fig, ax = _fig(2, f"{title} — duruş")
+    has_ap = "ctrl_gain_scale" in d
+    fig, ax = _fig(4 if has_ap else 3, f"{title} — duruş ve derinlik")
     for n, lab in (("phi", "φ"), ("theta", "θ"), ("psi", "ψ")):
-        ax[0].plot(t, deg(s(n)), label=lab)
+        line, = ax[0].plot(t, deg(s(n)), label=lab)
+        if has_ap and n != "phi":
+            ax[0].plot(t, deg(d[f"ctrl_{n}_ref"]), ls="--", lw=0.9, color=line.get_color(),
+                       label=f"{lab}_ref")
     _style(ax[0], "Euler [deg]", result)
     for n in ("p", "q", "r"):
         ax[1].plot(t, deg(s(n)), label=n)
     _style(ax[1], "açısal hız [deg/s]", result)
+    ax[2].plot(t, s("Z"), label="Z")
+    if has_ap and np.isfinite(d["ctrl_depth_ref"]).any():
+        ax[2].plot(t, d["ctrl_depth_ref"], ls="--", color="k", lw=0.9, label="Z_ref")
+    ax[2].invert_yaxis()
+    _style(ax[2], "derinlik Z [m]", result)
+    if has_ap:
+        ax[3].plot(t, d["ctrl_gain_scale"], label="k_s (kazanç ölçeği)")
+        if np.isfinite(d["ctrl_eta_hat"]).any():
+            ax[3].plot(t, d["ctrl_eta_hat"], ls="--", label="η tahmini")
+            ax[3].plot(t, d["fin_wet_span"] / max(result.meta.get("fin_span", 1.0), 1e-9),
+                       lw=0.8, label="η gerçek")
+        _style(ax[3], "otopilot çizelgesi [-]", result)
     files.append(_save(fig, out_dir, "02_durus.png", [ax[-1]]))
 
     fig, ax = _fig(2, f"{title} — yörünge (NED)", sharex=False)
@@ -141,8 +157,16 @@ def make_all_plots(result, out_dir, title=""):
     _style(ax[1], "kanat-yerel δ [deg]", result)
     ax[2].step(t, u["thrust"], where="post", label="itki")
     _style(ax[2], "T [N]", result)
-    ax[3].step(t, u["gas_flow"], where="post", label="gaz debisi")
-    _style(ax[3], "Q [L/min] / Cq", result)
+    if result.meta.get("vent_mode", "Q") == "Q":
+        ax[3].step(t, u["gas_flow"] / 60.0, where="post", label="gaz debisi Q")
+        _style(ax[3], "Q [L/s]", result)
+    else:
+        ax[3].step(t, u["gas_flow"], where="post", label="Cq (girdi)")
+        _style(ax[3], "Cq [-]", result)
+    ax3b = ax[3].twinx()
+    ax3b.plot(t, d["Cq"], color="tab:gray", lw=1, ls="--", label="Cq = Q/(V·Dn²)")
+    ax3b.set_ylabel("Cq [-]", color="tab:gray")
+    ax3b.legend(loc="lower right", fontsize=8)
     files.append(_save(fig, out_dir, "06_kontrol.png", [ax[-1]]))
 
     return files
