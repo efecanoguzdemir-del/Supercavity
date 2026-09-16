@@ -79,6 +79,14 @@ CF_SKIN = 0.003                    # Wetted-body skin friction coefficient (lega
 CDC_CROSSFLOW_SECTION = 1.2        # Hoerner crossflow Cdc used in per-section body integral
 N_BODY_SECTIONS = 40               # Number of axial body sections (legacy n_x)
 CAVITY_TAU = 0.15                  # Cavity Lc/Dc first-order lag time constant [s] (legacy tau)
+CD_BASE_EXPOSED = 0.20             # Transom tamamen kavite dışında: taban basınç sürüklemesi (legacy)
+CD_BASE_FULLY_WET = 0.15           # Kavite hiç yok (tam ıslak): taban basınç sürüklemesi (legacy)
+
+# Sürekli geçiş genişlikleri (smooth_transitions=True; legacy_exact modunda kullanılmaz)
+SIGMA_ONSET_WIDTH = 0.2            # Lc_ss, Dc_ss: σ ∈ [1−w, 1] aralığında 0'a iner
+ARC_FREE_BLEND = 0.2               # ıslak yay: rc ∈ [R_v, (1+w)·R_v] bitişik→serbest harmanlama
+TRANSOM_EXIT_START = 1.5           # planing→tamamen dışarıda: δ/R_v ∈ [başlangıç, başlangıç+genişlik]
+TRANSOM_EXIT_WIDTH = 1.0
 
 # ============================================================================
 # PLANING (TAIL-SLAP) SABİTLERİ — Dzielski-Kurdila 2003

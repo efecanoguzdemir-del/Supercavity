@@ -11,7 +11,7 @@ Planing sadece TRANSOM'da (kuyruğun en arkasında) uygulanır — bu, literatur
 sık yapılan hata (araç boyu boyunca dağıtmak) ile tutarsızdır.
 
 İşaret Konvansiyonu:
-  - Fz: vertical (positive = downward in body frame)
+  - Dikey kuvvet: YUKARI pozitif (legacy); gövde z-aşağıya dönüşüm dynamics/model.py'de
   - α_p: local planing angle (cavity axis slope at transom)
   - F_L: lift perpendicular to cavity surface (upward)
   - My: pitching moment (positive = nose-up)
@@ -20,8 +20,10 @@ sık yapılan hata (araç boyu boyunca dağıtmak) ile tutarsızdır.
 
 import numpy as np
 from .constants import (
-    RHO, V_MIN, G
+    RHO, V_MIN, G, CD_BASE_EXPOSED, CD_BASE_FULLY_WET,
+    TRANSOM_EXIT_START, TRANSOM_EXIT_WIDTH,
 )
+from .smooth import smoothstep
 
 
 def planing_force_dzielski_kurdila(V: float, R_v: float, R_c: float,
@@ -238,6 +240,103 @@ def planing_immersion_depth(R_v: float, h_cavity_axis: float, R_c: float) -> flo
     h_imm = R_v_safe + abs(h_cavity_axis) - R_c_safe
 
     return max(h_imm, 0.0)  # Force non-negative (immersion depth is positive quantity)
+
+
+# ============================================================================
+# TRANSOM KUVVETLERİ — legacy ile birebir (satır 1080-1165)
+# ============================================================================
+
+def transom_forces_legacy(V: float, R_v: float, rc_tail: float, h_tail: float,
+                          alpha_p: float, S_base: float,
+                          planing_enabled: bool = True) -> dict:
+    """
+    Transom planing kuvveti ve taban basınç sürüklemesi (legacy simulate() birebir).
+
+      δ = R_v + |h_tail| − rc_tail
+      δ ≤ 0 veya rc_tail ≤ 1e-4      → temas yok: F = 0
+      0 < δ < 2R_v  (planing)         → F_up = ρV²R_v²·f1·f2·α_p   (Dzielski-Kurdila,
+                                         ρV² — ½ YOK), F_press = F_up·α_p
+      δ ≥ 2R_v      (tamamen dışarıda) → F_up = 0, F_press = ½ρV²·S_base·CD_BASE_EXPOSED
+      f1 = 1 − (Δ/(δ+Δ))², Δ = max(rc_tail − R_v, 0);  f2 = (1+δ/R_v)/(1+2δ/R_v)
+
+    Not: planing_force_dzielski_kurdila() ½ρV² ve |α_p| kullanır; legacy ρV² ve
+    işaretli α_p kullanır. Bu fonksiyon legacy'yi izler.
+
+    Returns dict (legacy konvansiyonu):
+        F_planing  dikey kuvvet, YUKARI pozitif [N]
+        F_press    taban/planing basınç sürüklemesi, geri yönlü büyüklük [N]
+        delta      dalma derinliği [m]
+        regime     "disabled" | "covered" | "planing" | "exposed"
+    """
+    delta = R_v + abs(h_tail) - rc_tail
+    out = {"F_planing": 0.0, "F_press": 0.0, "delta": delta, "regime": "covered"}
+    if not planing_enabled:
+        out["regime"] = "disabled"
+        return out
+    if delta <= 0.0 or R_v <= 1e-6 or rc_tail <= 1e-4:
+        return out
+    if delta >= 2.0 * R_v:
+        out["F_press"] = 0.5 * RHO * V * V * S_base * CD_BASE_EXPOSED
+        out["regime"] = "exposed"
+        return out
+    gap = max(rc_tail - R_v, 0.0)
+    f1 = 1.0 - (gap / max(delta + gap, 1e-9)) ** 2
+    f2 = (1.0 + delta / R_v) / (1.0 + 2.0 * delta / R_v)
+    F_up = RHO * V * V * R_v * R_v * f1 * f2 * alpha_p
+    out.update(F_planing=F_up, F_press=F_up * alpha_p, regime="planing")
+    return out
+
+
+def transom_forces_smooth(V: float, R_v: float, rc_tail: float, h_tail: float,
+                          alpha_p: float, S_base: float,
+                          planing_enabled: bool = True) -> dict:
+    """
+    Transom kuvvetleri — rejim geçişleri sürekli (legacy_exact olmayan varsayılan model).
+
+    Legacy'deki sıçramalar ve giderilmesi:
+      (1) Kavite ucu transomu geçtiği an (rc_tail: 0 → Rn) planing 0 → ~660 N.
+          → Kaplama ağırlığı c = smoothstep(rc_tail/R_v): kavite transomda gövdeden
+            dar iken kuyruk büyük ölçüde ıslaktır, Dzielski-Kurdila "duvara çarpma"
+            modeli geçerli değildir; c → 1 olunca tam devreye girer.
+      (2) Kavite yok ↔ var: legacy taban sürüklemesi 0.15·q·S ↔ 0 anahtarlıyor.
+          → Taban sürüklemesi (1 − c)·CD_BASE_FULLY_WET·q·S (kavite transomu örtmedikçe).
+      (3) δ = 2R_v eşiği (planing → tamamen dışarıda) anahtarlaması.
+          → w = smoothstep((δ/R_v − 1.5)/1.0) ile planing ↔ CD_BASE_EXPOSED harmanlaması.
+      δ → 0⁺ girişi zaten süreklidir (Δ > 0 iken f1 → 0).
+
+      F_DK    = ρV²R_v²·f1·f2·α_p   (δ > 0; aksi 0)
+      F_up    = c·(1 − w)·F_DK                                     [planing kapalıysa 0]
+      F_press = (1 − c)·CD_FW·q·S + c·[(1 − w)·F_DK·α_p + w·CD_EXP·q·S]
+    Taban sürüklemesi planing_enabled'dan bağımsızdır (planing değil, taban basıncı).
+
+    Returns: F_planing (yukarı +), F_press (geri +), delta, cover_tail (c), regime
+    """
+    q = 0.5 * RHO * V * V
+    c = smoothstep(rc_tail / R_v) if R_v > 1e-6 else 0.0
+    delta = R_v + abs(h_tail) - rc_tail
+
+    F_dk = 0.0
+    if delta > 0.0 and R_v > 1e-6 and planing_enabled:
+        gap = max(rc_tail - R_v, 0.0)
+        f1 = 1.0 - (gap / max(delta + gap, 1e-9)) ** 2
+        f2 = (1.0 + delta / R_v) / (1.0 + 2.0 * delta / R_v)
+        F_dk = RHO * V * V * R_v * R_v * f1 * f2 * alpha_p
+    w = smoothstep((delta / R_v - TRANSOM_EXIT_START) / TRANSOM_EXIT_WIDTH) if R_v > 1e-6 else 0.0
+
+    F_up = c * (1.0 - w) * F_dk
+    F_press = ((1.0 - c) * CD_BASE_FULLY_WET * q * S_base
+               + c * ((1.0 - w) * F_dk * alpha_p + w * CD_BASE_EXPOSED * q * S_base))
+
+    if c < 0.5:
+        regime = "tail_wet"
+    elif delta <= 0.0:
+        regime = "covered"
+    elif w > 0.5:
+        regime = "exposed"
+    else:
+        regime = "planing"
+    return {"F_planing": F_up, "F_press": F_press, "delta": delta,
+            "cover_tail": c, "regime": regime}
 
 
 # ============================================================================

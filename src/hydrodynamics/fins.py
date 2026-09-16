@@ -196,8 +196,22 @@ def fin_aoa_effective(alpha_aoa: float, delta_fin: float, azimuth: float) -> flo
     return alpha_eff
 
 
+def cavity_radius_ellipse(x_cav: float, Lc: float, Dc: float) -> float:
+    """
+    Kanat konumundaki kavite yarıçapı — elipsoid yaklaşımı (legacy satır 971-977).
+
+      ξ = 2x/Lc − 1 ∈ [−1, 1],   R_c = (Dc/2)·√(1 − ξ²)
+    Kavite yok (Lc, Dc ≤ 1e-6) veya x ≥ Lc ise 0.
+    """
+    if Lc <= 1e-6 or Dc <= 1e-6 or x_cav >= Lc:
+        return 0.0
+    xi = max(-1.0, min(1.0, 2.0 * x_cav / Lc - 1.0))
+    return 0.5 * Dc * np.sqrt(max(0.0, 1.0 - xi * xi))
+
+
 def fin_lift_and_drag(V: float, fin_chord: float, wet_span: float,
-                      CL_alpha: float, alpha_eff: float) -> tuple:
+                      CL_alpha: float, alpha_eff: float,
+                      span_for_AR: float = None) -> tuple:
     """
     Compute lift and drag forces on fin at given angle.
 
@@ -216,6 +230,8 @@ def fin_lift_and_drag(V: float, fin_chord: float, wet_span: float,
         wet_span: Wetted (immersed) fin span [m]
         CL_alpha: 3D lift slope [1/rad]
         alpha_eff: Effective angle of attack [rad]
+        span_for_AR: İndüklenmiş drag AR'si için span [m]. None → wet_span.
+                     Legacy tam span kullanır (fin_k_induced sabit).
 
     Returns:
         (F_L, F_D): Lift [N], Drag [N]
@@ -243,7 +259,8 @@ def fin_lift_and_drag(V: float, fin_chord: float, wet_span: float,
     CL = CL_alpha * alpha_clipped
 
     # Drag coefficient (induced + profile)
-    CD = fin_drag_coefficient(alpha_clipped, CL, fin_chord, wet_span)
+    CD = fin_drag_coefficient(alpha_clipped, CL, fin_chord,
+                              wet_span if span_for_AR is None else span_for_AR)
 
     # Forces
     F_L = q * S_wet * CL

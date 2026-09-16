@@ -1,141 +1,142 @@
 """
-3-DOF Attitude Autopilot — Kapalı çevrim yaw, pitch, roll servo.
+Pitch + yaw duruş otopilotu (ayrık, kapalı çevrim). Roll kontrolü YOK (kullanıcı kararı).
 
-PIDController: tek-eksen PID (yaw, pitch, roll için)
-AttitudeAutopilot: 3-DOF servo, durum vektöründen feedback alır
+Simülatör update(t, x)'i her dt_control (1 ms) başında bir kez çağırır; komut periyot
+boyunca ZOH tutulur. PID durumu (integratör, rate limit belleği) sadece update'te ilerler.
+
+Eksen başına kontrol yasası (SI, radyan):
+    e      = ref − ölçüm                   (yaw: [−π, π]'ye sarılır)
+    ω_meas = Euler açı hızı (θ̇ veya ψ̇)   — türev ÖLÇÜMDEN, hatadan değil (derivative kick yok)
+    v      = k_s·(Kp·(b·ref − ölçüm) + I − Kd·ω_meas)   "burnu ref yönüne çevirme" isteği [rad]
+             b: referans ağırlığı (0..1). b<1 referans adımında P sıçramasını ve aşımı azaltır;
+             kalıcı hatayı integratör (tam hata e ile) sıfırlar.
+    δ      = trim + sign·v                  → |δ| ≤ limit, |Δδ| ≤ rate_limit·dt
+    I     += Ki·e·dt   (koşullu: çıkış doymuşken hata doymayı derinleştiriyorsa DONDUR; |I| ≤ i_limit)
+
+İşaretler (model.py): δe > 0 → burun aşağı ⇒ pitch sign = −1 ;  δr > 0 → burun sancak (ψ↑) ⇒ yaw sign = +1.
+Kazanç çizelgesi: k_s = clip((V_ref/V)², 0.25, 4) — kanat etkinliği ~V² (V_ref=None → k_s=1).
+
+Birimler: Kp [rad/rad], Ki [1/s], Kd [s]; config'te limitler derece.
 """
 
 import numpy as np
 
+from src.dynamics.blocks import Controller, schedule_value
+from src.dynamics.model import ControlInput
+from src.dynamics.state import IDX_PHI, IDX_THETA, IDX_PSI, IDX_Q, IDX_R, SL_NU_LIN
 
-class PIDController:
-    """Tek-eksen PID kontrolör — anti-windup ve angle wrapping desteği."""
+GAIN_SCALE_MIN, GAIN_SCALE_MAX = 0.25, 4.0
+COS_THETA_MIN = 1e-3
 
-    def __init__(self, Kp, Ki=0.0, Kd=0.0, dt=0.001, output_max=20.0, wrap_error=False):
-        """
-        Args:
-            Kp, Ki, Kd: PID kazançları
-            dt: zaman adımı [s]
-            output_max: çıkış satürasyon sınırı [deg] (kayançlar bu limitte kırpılır)
-            wrap_error: True ise hata -π to π aralığında sarılır (yaw için)
-        """
-        self.Kp = Kp
-        self.Ki = Ki
-        self.Kd = Kd
-        self.dt = dt
-        self.output_max = output_max
-        self.wrap_error = wrap_error
 
-        self.error_integral = 0.0
-        self.error_prev = 0.0
+def wrap_angle(a):
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
 
-    def step(self, error):
-        """
-        PID adımı: u = Kp·e + Ki·∫e·dt + Kd·de/dt
 
-        Args:
-            error: desired - current (hatanın yönü)
+class AxisPID:
+    """Tek eksen: anti-windup (koşullu integrasyon + |I| sınırı), ölçümden türev, doyum, hız sınırı."""
 
-        Returns:
-            output: [-output_max, +output_max] satürasyonlu kontrol komut [deg]
-        """
-        if self.wrap_error:
-            # Yaw hatası -π to π aralığında
-            error = (error + np.pi) % (2 * np.pi) - np.pi
-
-        # İntegral terim
-        self.error_integral += error * self.dt
-
-        # Türev terim
-        d_error = (error - self.error_prev) / self.dt if self.dt > 0 else 0.0
-        self.error_prev = error
-
-        # PID hesabı
-        output = self.Kp * error + self.Ki * self.error_integral + self.Kd * d_error
-
-        # Satürasyon
-        return np.clip(output, -self.output_max, self.output_max)
+    def __init__(self, Kp, Ki=0.0, Kd=0.0, b=1.0, limit_deg=20.0, i_limit_deg=None,
+                 rate_limit_deg_s=None, sign=1.0, trim_deg=0.0):
+        self.Kp, self.Ki, self.Kd, self.b = float(Kp), float(Ki), float(Kd), float(b)
+        self.limit = np.radians(limit_deg)
+        self.i_limit = np.radians(i_limit_deg) if i_limit_deg is not None else self.limit
+        self.rate_limit = np.radians(rate_limit_deg_s) if rate_limit_deg_s else None
+        self.sign = float(sign)
+        self.trim = np.radians(trim_deg)
+        self.reset()
 
     def reset(self):
-        """Durumu sıfırla (simülasyon başında)."""
-        self.error_integral = 0.0
-        self.error_prev = 0.0
+        self.I = 0.0
+        self.cmd = self.trim
+        self.saturated = False
+
+    def update(self, e, omega_meas, dt, k_s=1.0, ref=0.0):
+        """e = ref − ölçüm (sarılmış olabilir); ref sadece b<1 ise P terimini etkiler."""
+        e_p = e - (1.0 - self.b) * ref
+
+        def command(I):
+            raw = self.trim + self.sign * k_s * (self.Kp * e_p + I - self.Kd * omega_meas)
+            c = min(max(raw, -self.limit), self.limit)
+            if self.rate_limit is not None and dt > 0.0:
+                step = self.rate_limit * dt
+                c = min(max(c, self.cmd - step), self.cmd + step)
+            return raw, c
+
+        I_new = self.I
+        if dt > 0.0 and self.Ki != 0.0:
+            I_new = float(np.clip(self.I + self.Ki * e * dt, -self.i_limit, self.i_limit))
+        raw, c = command(I_new)
+        # Çıkış kırpıldıysa ve integratör artışı kırpma yönüne itiyorsa integrasyonu dondur
+        pushing = self.sign * (I_new - self.I) * (raw - c) > 0.0
+        if c != raw and pushing:
+            I_new = self.I
+            raw, c = command(I_new)
+        self.I = I_new
+        self.saturated = c != raw
+        self.cmd = c
+        return c
 
 
-class AttitudeAutopilot:
+class AttitudeAutopilot(Controller):
     """
-    3-DOF attitude servo: yaw (ψ) → δr, pitch (θ) → δe, roll (φ) → δa.
-
-    ControlInputBlock arayüzünü uygular.
+    θ_ref, ψ_ref (derece; sayı veya [(t, değer), ...]) takibi → δe, δr.
+    Açık çevrim kanallar (schedule): delta_c_deg, thrust, gas_flow.
     """
 
-    def __init__(self, pid_yaw, pid_pitch, pid_roll=None, dt=0.001):
-        """
-        Args:
-            pid_yaw: {"Kp": ..., "Ki": ..., "Kd": ..., "output_max": ...}
-            pid_pitch: {"Kp": ..., ...}
-            pid_roll: {"Kp": ..., ...} (opsiyonel, None ise roll kontrol off)
-            dt: zaman adımı [s]
-        """
-        self.dt = dt
-
-        self.pid_yaw = PIDController(**pid_yaw, dt=dt, wrap_error=True)
-        self.pid_pitch = PIDController(**pid_pitch, dt=dt, wrap_error=False)
-
-        if pid_roll is not None:
-            self.pid_roll = PIDController(**pid_roll, dt=dt, wrap_error=False)
-        else:
-            self.pid_roll = None
-
-    def step(self, t, x_state, attitude_refs):
-        """
-        Kontrol komutları hesapla.
-
-        Args:
-            t: mevcut zaman [s]
-            x_state: durum vektörü [u,v,w, p,q,r, φ,θ,ψ, X,Y,Z, Lc,pc]
-            attitude_refs: {
-                "ψ_desired": float [rad],
-                "θ_desired": float [rad],
-                "φ_desired": float [rad] (opsiyonel, default 0),
-                "δc_fixed": float [deg] (kavitatör, kontrol edilmez)
-            }
-
-        Returns:
-            (δc, δe, δr, δa): kontrol komutları [deg]
-                δc: kavitatör (açık çevrim veya sabit)
-                δe: elevator (pitch servo)
-                δr: rudder (yaw servo)
-                δa: aileron (roll servo)
-        """
-        # Durum vektöründen attitude al
-        φ_current = x_state[6]   # roll
-        θ_current = x_state[7]   # pitch
-        ψ_current = x_state[8]   # yaw
-
-        # İstenilen attitude'lar
-        ψ_desired = attitude_refs.get("ψ_desired", ψ_current)
-        θ_desired = attitude_refs.get("θ_desired", 0.0)
-        φ_desired = attitude_refs.get("φ_desired", 0.0)
-
-        # Hatalar
-        ψ_error = ψ_desired - ψ_current
-        θ_error = θ_desired - θ_current
-        φ_error = φ_desired - φ_current
-
-        # PID çıkışları
-        δr = self.pid_yaw.step(ψ_error)
-        δe = self.pid_pitch.step(θ_error)
-        δa = self.pid_roll.step(φ_error) if self.pid_roll else 0.0
-
-        # δc (kavitatör) otopilot tarafından kontrol edilmez
-        δc = attitude_refs.get("δc_fixed", 0.0)
-
-        return δc, δe, δr, δa
+    def __init__(self, pitch, yaw, theta_ref_deg=0.0, psi_ref_deg=0.0, V_ref=None,
+                 delta_c_deg=0.0, thrust=0.0, gas_flow=0.0, V_min=5.0):
+        self.pitch = AxisPID(sign=-1.0, **pitch)
+        self.yaw = AxisPID(sign=+1.0, **yaw)
+        self.theta_ref = theta_ref_deg
+        self.psi_ref = psi_ref_deg
+        self.V_ref = V_ref
+        self.V_min = float(V_min)
+        self.open_loop = dict(delta_c_deg=delta_c_deg, thrust=thrust, gas_flow=gas_flow)
+        self.reset()
 
     def reset(self):
-        """Tüm PID state'lerini sıfırla."""
-        self.pid_yaw.reset()
-        self.pid_pitch.reset()
-        if self.pid_roll:
-            self.pid_roll.reset()
+        self.pitch.reset()
+        self.yaw.reset()
+        self.t_prev = None
+        self.log = {}
+
+    def gain_scale(self, V):
+        if not self.V_ref:
+            return 1.0
+        return float(np.clip((self.V_ref / max(V, self.V_min)) ** 2, GAIN_SCALE_MIN, GAIN_SCALE_MAX))
+
+    def update(self, t, x):
+        dt = 0.0 if self.t_prev is None else t - self.t_prev
+        self.t_prev = t
+
+        phi, theta, psi = x[IDX_PHI], x[IDX_THETA], x[IDX_PSI]
+        q, r = x[IDX_Q], x[IDX_R]
+        cphi, sphi = np.cos(phi), np.sin(phi)
+        cth = np.cos(theta)
+        cth = np.copysign(max(abs(cth), COS_THETA_MIN), cth)
+        theta_dot = q * cphi - r * sphi
+        psi_dot = (q * sphi + r * cphi) / cth
+
+        V = float(np.linalg.norm(x[SL_NU_LIN]))
+        k_s = self.gain_scale(V)
+
+        th_ref = np.radians(schedule_value(t, self.theta_ref))
+        ps_ref = np.radians(schedule_value(t, self.psi_ref))
+        e_th = th_ref - theta
+        e_ps = wrap_angle(ps_ref - psi)
+
+        de = self.pitch.update(e_th, theta_dot, dt, k_s, ref=th_ref)
+        dr = self.yaw.update(e_ps, psi_dot, dt, k_s, ref=ps_ref)
+
+        self.log = dict(theta_ref=th_ref, psi_ref=ps_ref, e_theta=e_th, e_psi=e_ps,
+                        I_pitch=self.pitch.I, I_yaw=self.yaw.I, gain_scale=k_s,
+                        sat_pitch=self.pitch.saturated, sat_yaw=self.yaw.saturated)
+
+        ol = self.open_loop
+        return ControlInput(
+            delta_e=de, delta_r=dr,
+            delta_c=np.radians(schedule_value(t, ol["delta_c_deg"])),
+            thrust=schedule_value(t, ol["thrust"]),
+            gas_flow=schedule_value(t, ol["gas_flow"]),
+        )

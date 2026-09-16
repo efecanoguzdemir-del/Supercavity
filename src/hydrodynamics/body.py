@@ -34,8 +34,10 @@ import numpy as np
 from .constants import (
     RHO, G, CF_SKIN, CDC_CROSSFLOW_SECTION, N_BODY_SECTIONS,
     CL_ALPHA_BODY_DEFAULT, CDC_BODY_DEFAULT, K_DEV_DEFAULT, BODY_VOLUME_CORRECTION,
+    ARC_FREE_BLEND,
 )
 from .cavity import cavity_axis_offset
+from .smooth import smoothstep
 
 # Legacy eşikleri (fiziksel sabit değil, sayısal koruma)
 _V_AXIS_MIN = 0.5          # bu hızın altında kavite ekseni sapması 0 alınır
@@ -85,12 +87,17 @@ def cavity_opening_length(R_n, Cx):
 # KESİT KAVİTE YARIÇAPI
 # ============================================================================
 
-def cavity_radius_logvinovich(x_cav, Lc, Dc, R_n, Cx):
+def cavity_radius_logvinovich(x_cav, Lc, Dc, R_n, Cx, smooth_closure=False):
     """
     Logvinovich asimptotik profil: R²(x) = Rn² + (Rmax² − Rn²)·S(x)·D(x)
       S = 1 − exp(−x/x_open)                       (σ-bağımsız açılma)
       D = 1 (x < Lc/2), 1 − ((x−Lc/2)/(Lc/2))² aksi (parabolik kapanma, ≥0)
     x_cav ≥ Lc ise 0 döner (kavite dışı).
+
+    Legacy (smooth_closure=False): kapanma ucunda R → Rn, x = Lc'de 0'a SIÇRAR
+    (her gövde kesitinde ıslaklık/sürtünme basamağı üretir).
+    smooth_closure=True: kapanma yarısında R² = (Rn² + (Rmax² − Rn²)·S)·D → x→Lc'de R→0
+    sürekli. Açılma yarısı (x < Lc/2) legacy ile aynı; fark sadece R ~ Rn olduğu uçta.
     """
     if x_cav >= Lc:
         return 0.0
@@ -102,12 +109,16 @@ def cavity_radius_logvinovich(x_cav, Lc, Dc, R_n, Cx):
         D = 1.0
     else:
         D = max(0.0, 1.0 - ((x_cav - x_mid) / max(Lc - x_mid, 1e-6)) ** 2)
-    rc2 = R_n ** 2 + (Rmax ** 2 - R_n ** 2) * S * D
+    if smooth_closure:
+        rc2 = (R_n ** 2 + (Rmax ** 2 - R_n ** 2) * S) * D
+    else:
+        rc2 = R_n ** 2 + (Rmax ** 2 - R_n ** 2) * S * D
     return float(np.sqrt(max(rc2, 0.0)))
 
 
 def cavity_radius_at_section(x_cav, R_v, Lc, Dc, R_n, Cx,
-                             body_volume_correction=BODY_VOLUME_CORRECTION):
+                             body_volume_correction=BODY_VOLUME_CORRECTION,
+                             smooth_closure=False):
     """
     Gövde varlığı düzeltmeli kesit kavite yarıçapı.
 
@@ -118,7 +129,7 @@ def cavity_radius_at_section(x_cav, R_v, Lc, Dc, R_n, Cx,
     """
     if x_cav >= Lc:
         return 0.0, 0.0, "none"
-    rc_logv = cavity_radius_logvinovich(x_cav, Lc, Dc, R_n, Cx)
+    rc_logv = cavity_radius_logvinovich(x_cav, Lc, Dc, R_n, Cx, smooth_closure)
     if rc_logv >= R_v:
         rc_x = np.sqrt(rc_logv ** 2 + R_v ** 2) if body_volume_correction else rc_logv
         return float(rc_x), rc_logv, "free"
@@ -129,7 +140,16 @@ def cavity_radius_at_section(x_cav, R_v, Lc, Dc, R_n, Cx,
 # ISLAK YAY AÇISI
 # ============================================================================
 
-def wetted_arc(R_v, rc_x, rc_logv, hc_x):
+def _free_arc(R_v, delta):
+    """Serbest kavite içinde (rc ≥ R_v) dalma derinliğinden ıslak yay açısı."""
+    if delta >= 2.0 * R_v:
+        return 2.0 * np.pi
+    if delta > 0:
+        return 2.0 * np.arccos(max(min(1.0 - delta / R_v, 1.0), -1.0))
+    return 0.0
+
+
+def wetted_arc(R_v, rc_x, rc_logv, hc_x, smooth=False):
     """
     Kesitteki ıslak yay açısı.
 
@@ -140,9 +160,23 @@ def wetted_arc(R_v, rc_x, rc_logv, hc_x):
         rc_logv < 0.05·R_v → θ = 2π ; aksi θ = 2π·(1 − rc_logv/R_v)
     Kavite yok (rc_x ≤ 1e-4): θ = 2π
 
+    smooth=True (sürekli): attached θ = 2π·(1 − rc_logv/R_v) eşiksiz (rc→0'da 2π'ye
+    sürekli); rc_logv ∈ [R_v, (1+ARC_FREE_BLEND)·R_v] aralığında attached (=0) ile free
+    formül smoothstep ile harmanlanır. Legacy'de gövde hacmi düzeltmesi (rc_x = √(rc²+R_v²))
+    sınırda δ'yı −0.41·R_v kaydırdığından |h| > 0.41·R_v iken burada sıçrama vardı.
+
     Returns: (theta_wet [rad], s_wet [m], delta_eff [m])
     """
     delta = R_v + abs(hc_x) - rc_x
+    if smooth:
+        if rc_logv <= 0.0 or R_v <= 1e-6:
+            theta = 2.0 * np.pi
+        elif rc_logv < R_v:
+            theta = 2.0 * np.pi * (1.0 - rc_logv / R_v)
+        else:
+            w = smoothstep((rc_logv - R_v) / (ARC_FREE_BLEND * R_v))
+            theta = w * _free_arc(R_v, delta)
+        return theta, R_v * theta, R_v * (1.0 - np.cos(0.5 * theta))
     if rc_x > 1e-4 and R_v > 1e-6:
         if rc_logv >= R_v:
             if delta >= 2.0 * R_v:
@@ -185,6 +219,10 @@ def compute_body_forces(V, alpha, Lc, Dc, Cx, params):
             alpha_eff [rad] (verilirse delta_cav yok sayılır)
             k_dev, CL_alpha_body, Cdc_body, body_volume_correction
             Cf, n_x (opsiyonel; varsayılan constants.CF_SKIN, N_BODY_SECTIONS)
+            smooth_transitions (bool, varsayılan False = legacy birebir):
+                True → kesit döngüsü kavite olmasa da çalışır (legacy tam-ıslak dalı
+                F_skin=0 hatası ve kavite oluşumundaki sıçrama yok), sürekli kapanma
+                ve sürekli ıslak yay kullanılır.
 
     Returns dict (kuvvet YUKARI +, moment (x_cg − x)·F, x burundan):
         F_skin        ıslak yay sürtünmesi [N]
@@ -211,6 +249,7 @@ def compute_body_forces(V, alpha, Lc, Dc, Cx, params):
     body_vol_corr = bool(_p(params, "body_volume_correction", BODY_VOLUME_CORRECTION))
     Cf = float(_p(params, "Cf", CF_SKIN))
     n_x = int(_p(params, "n_x", N_BODY_SECTIONS))
+    smooth = bool(_p(params, "smooth_transitions", False))
 
     if "alpha_eff" in params and params["alpha_eff"] is not None:
         alpha_eff = float(params["alpha_eff"])
@@ -243,7 +282,7 @@ def compute_body_forces(V, alpha, Lc, Dc, Cx, params):
 
     cavity_exists = Lc > _CAV_EXIST_MIN and Dc > _CAV_EXIST_MIN
 
-    if cavity_exists:
+    if cavity_exists or smooth:
         x_open = cavity_opening_length(R_n, Cx)
         for xs_local in np.linspace(0.5 * dx, L_veh - 0.5 * dx, n_x):
             xs_cav = xs_local + x_body_start
@@ -253,8 +292,8 @@ def compute_body_forces(V, alpha, Lc, Dc, Cx, params):
             else:
                 hc_x = 0.0
             rc_x, rc_logv, _ = cavity_radius_at_section(xs_cav, R_v, Lc, Dc, R_n, Cx,
-                                                        body_vol_corr)
-            theta_wet, s_wet, _ = wetted_arc(R_v, rc_x, rc_logv, hc_x)
+                                                        body_vol_corr, smooth_closure=smooth)
+            theta_wet, s_wet, _ = wetted_arc(R_v, rc_x, rc_logv, hc_x, smooth=smooth)
 
             if s_wet > 0.0:
                 wet_len += dx

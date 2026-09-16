@@ -20,9 +20,13 @@ Sign Conventions (Body-Fixed, Aeronautical):
   δ: Control deflection (positive = nose-up deflection)
   β: Cone apex angle
 
-  Fx: Forward drag (positive = retarding)
-  Fz: Vertical (positive = downward, lift = negative contribution)
-  My: Pitching moment (positive = nose-up rotation, right-hand rule about y)
+  DİKKAT — bu paketin fonksiyonları legacy konvansiyonunu kullanır:
+  Drag: pozitif büyüklük (geri yönlü)
+  Lift / dikey kuvvet (F_lift, F_L_z, F_pz, F_planing, F_body_lift, F_buoy):
+        YUKARI POZİTİF (gövde z-aşağı DEĞİL)
+  Moment: M_y = (x_cg − x_force)·F_up, pozitif = burun yukarı; x burundan ölçülür
+  Gövde çerçevesine (x-ileri, y-sancak, z-aşağı, CG orijinli) dönüşüm TEK YERDE:
+  src/dynamics/model.py (F_z_body = −F_up, x_body = x_cg − x_nose).
 
 Usage Example:
   >>> from src.hydrodynamics import constants, cavity, cavitator, fins, planing

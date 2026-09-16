@@ -9,7 +9,7 @@ Disk ve konik kavitatörler için viskoz düzeltme.
 
 İşaret Konvansiyonu:
   - Fx: forward drag (positive = retarding, akışa karşı)
-  - Fz: vertical (positive = downward in body frame, lift up = negative Fz)
+  - Lift: YUKARI pozitif (legacy); gövde z-aşağıya dönüşüm dynamics/model.py'de
   - My: pitching moment (positive = nose-up, sağ-el kuralı y-ekseni etraf)
 ================================================================================
 """
@@ -92,7 +92,8 @@ def cavitator_drag(V: float, Dn: float, Cx: float, alpha_eff: float) -> float:
 def cavitator_lift_coefficient(sigma: float, cav_type: str = "disk",
                                 cone_apex_rad: float = None,
                                 K_slender: float = K_SLENDER_DEFAULT,
-                                K_cone_lift: float = 0.0) -> float:
+                                K_cone_lift: float = 0.0,
+                                cone_lift_gain: float = 0.0) -> float:
     """
     Compute cavitator lift coefficient (May-Birkhoff / Logvinovich hybrid).
 
@@ -115,6 +116,8 @@ def cavitator_lift_coefficient(sigma: float, cav_type: str = "disk",
         cone_apex_rad: Cone apex angle [rad] (full angle, β) — if None assumes disk
         K_slender: Slender body cross-flow lift factor (0-2, default 1.0)
         K_cone_lift: Lateral surface effect factor (0-2, default 0.0)
+        cone_lift_gain: Legacy ikinci yan yüzey çarpanı (0-2, default 0.0):
+            K = 1 + (1/√max(sin(β/2),0.05) − 1)·cone_lift_gain  (legacy satır 1297-1301)
 
     Returns:
         CL_α: Cavitator lift coefficient per unit angle [1/rad]
@@ -149,7 +152,9 @@ def cavitator_lift_coefficient(sigma: float, cav_type: str = "disk",
         else:
             K_lateral = 1.0
 
-        CL_α = CL_hybrid * K_lateral
+        K_gain = 1.0 + (1.0 / np.sqrt(max(np.sin(beta_half), 0.05)) - 1.0) * cone_lift_gain
+
+        CL_α = CL_hybrid * K_lateral * K_gain
     else:
         # Disk (β=180°, sin²(β/2)=1, cos²(β/2)=0)
         CL_α = CL_base

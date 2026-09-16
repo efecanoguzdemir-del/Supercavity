@@ -1,112 +1,70 @@
 """
-Kontrol girdisi sözleşmesi ve implementasyonları.
+Kontrol girdisi sözleşmesi (simulation/simulator.py bunu kullanır).
 
-ControlInputBlock: Abstract kontrol bloğu
-OpenLoopController: Zaman-tabanlı schedule'lar
-ClosedLoopController: AttitudeAutopilot + açık çevrim δc/Cq
+  Controller          ayrık kontrolcü tabanı: update(t, x) -> ControlInput
+  ScheduleController  açık çevrim ZOH zaman programı
+  schedule_value      ZOH yardımcı
+
+Kapalı çevrim otopilot: src/control/autopilot.py::AttitudeAutopilot (Controller alt sınıfı).
 """
 
 from abc import ABC, abstractmethod
+
 import numpy as np
 
+from .model import ControlInput
 
-class ControlInputBlock(ABC):
-    """Kontrol girdisi sözleşmesi."""
+
+def schedule_value(t, spec, default=0.0):
+    """ZOH değer. spec: sayı, None veya [(t0, v0), (t1, v1), ...] (t < t0 → v0)."""
+    if spec is None:
+        return default
+    if np.isscalar(spec):
+        return float(spec)
+    if len(spec) == 0:
+        return default
+    current = spec[0][1]
+    for tk, vk in spec:
+        if t >= tk:
+            current = vk
+        else:
+            break
+    return float(current)
+
+
+class Controller(ABC):
+    """
+    Ayrık kontrolcü. Simülatör update()'i her dt_control periyodunun başında
+    BİR kez çağırır; dönen komut RK4 alt aşamaları boyunca sabit (ZOH) tutulur.
+    İç durum (integratör vb.) sadece update() içinde ilerletilmelidir.
+    """
+
+    def reset(self):
+        """Koşum başında çağrılır."""
 
     @abstractmethod
-    def step(self, t, x_state, params):
-        """
-        Kontrol komutları hesapla.
-
-        Args:
-            t: zaman [s]
-            x_state: durum vektörü
-            params: konfigürasyon dict'i
-
-        Returns:
-            (δc, δe, δr, δa, Cq): kontrol komutları
-        """
-        pass
+    def update(self, t, x):
+        """t [s], x (15 durum, ölçüm) -> ControlInput."""
 
 
-class OpenLoopController(ControlInputBlock):
-    """Zaman-tabanlı açık çevrim schedule'lar."""
+class ScheduleController(Controller):
+    """
+    Açık çevrim zaman programı. Her kanal sayı veya [(t, değer), ...] listesi:
+      delta_e_deg, delta_r_deg, delta_c_deg [derece], thrust [N],
+      gas_flow [L/min veya Cq, vent_mode'a göre]
+    """
 
-    def __init__(self, δc_schedule, δe_schedule, δr_schedule, δa_schedule, Cq_schedule):
-        """
-        Args:
-            *_schedule: [( (t0, val0), (t1, val1), ... )]
-                Zero-order hold: t < t0 → val0, t0 ≤ t < t1 → val0, vs.
-        """
-        self.δc_schedule = δc_schedule
-        self.δe_schedule = δe_schedule
-        self.δr_schedule = δr_schedule
-        self.δa_schedule = δa_schedule
-        self.Cq_schedule = Cq_schedule
+    def __init__(self, delta_e_deg=0.0, delta_r_deg=0.0, delta_c_deg=0.0,
+                 thrust=0.0, gas_flow=0.0):
+        self.spec = dict(delta_e_deg=delta_e_deg, delta_r_deg=delta_r_deg,
+                         delta_c_deg=delta_c_deg, thrust=thrust, gas_flow=gas_flow)
 
-    def step(self, t, x_state, params):
-        δc = self._get_schedule_value(t, self.δc_schedule)
-        δe = self._get_schedule_value(t, self.δe_schedule)
-        δr = self._get_schedule_value(t, self.δr_schedule)
-        δa = self._get_schedule_value(t, self.δa_schedule)
-        Cq = self._get_schedule_value(t, self.Cq_schedule)
-        return δc, δe, δr, δa, Cq
-
-    @staticmethod
-    def _get_schedule_value(t_now, schedule):
-        """
-        Schedule listesinden t_now anındaki değeri ZOH döndürür.
-
-        schedule: [(t0, v0), (t1, v1), ...]
-        t < t0 ise v0, t0 ≤ t < t1 ise v0, t1 ≤ t < t2 ise v1, vs.
-        """
-        if not schedule:
-            return 0.0
-
-        current_val = schedule[0][1]  # t < t0 ise ilk değer
-        for (t_step, val) in schedule:
-            if t_now >= t_step:
-                current_val = val
-            else:
-                break
-        return current_val
-
-
-class ClosedLoopController(ControlInputBlock):
-    """3-DOF AttitudeAutopilot + açık çevrim δc/Cq."""
-
-    def __init__(self, attitude_autopilot, δc_schedule, Cq_schedule):
-        """
-        Args:
-            attitude_autopilot: AttitudeAutopilot instance
-            δc_schedule, Cq_schedule: açık çevrim schedule'lar
-        """
-        self.autopilot = attitude_autopilot
-        self.δc_schedule = δc_schedule
-        self.Cq_schedule = Cq_schedule
-
-    def step(self, t, x_state, params):
-        # AttitudeAutopilot'tan δe, δr, δa al
-        attitude_refs = params.get("attitude_refs", {})
-        δc_ap, δe_ap, δr_ap, δa_ap = self.autopilot.step(t, x_state, attitude_refs)
-
-        # δc ve Cq açık çevrim schedule'dan
-        δc = self._get_schedule_value(t, self.δc_schedule)
-        Cq = self._get_schedule_value(t, self.Cq_schedule)
-
-        # δe, δr, δa otopilot tarafından sağlanır
-        return δc, δe_ap, δr_ap, δa_ap, Cq
-
-    @staticmethod
-    def _get_schedule_value(t_now, schedule):
-        """Schedule ZOH değeri."""
-        if not schedule:
-            return 0.0
-
-        current_val = schedule[0][1]
-        for (t_step, val) in schedule:
-            if t_now >= t_step:
-                current_val = val
-            else:
-                break
-        return current_val
+    def update(self, t, x):
+        s = self.spec
+        return ControlInput(
+            delta_e=np.radians(schedule_value(t, s["delta_e_deg"])),
+            delta_r=np.radians(schedule_value(t, s["delta_r_deg"])),
+            delta_c=np.radians(schedule_value(t, s["delta_c_deg"])),
+            thrust=schedule_value(t, s["thrust"]),
+            gas_flow=schedule_value(t, s["gas_flow"]),
+        )

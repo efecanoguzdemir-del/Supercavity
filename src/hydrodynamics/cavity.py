@@ -15,8 +15,9 @@ import numpy as np
 from .constants import (
     SIGMA_MIN, V_MIN, CAVITY_MIN,
     CX0_DISK, K_G_CAVITY_DEFAULT,
-    RHO, P_VAP, TAU_PC, A_V_DEFAULT, K_LEAK
+    RHO, P_VAP, TAU_PC, A_V_DEFAULT, K_LEAK, CAVITY_TAU, SIGMA_ONSET_WIDTH
 )
+from .smooth import smoothstep
 
 
 def cavity_geometry(sigma: float, Dn: float, model: str = "savchenko",
@@ -258,6 +259,75 @@ def compute_pc_target(p_inf: float, sigma_hybrid: float, V: float) -> float:
     pc_target = min(pc_target, p_inf - 1.0)  # Must be below ambient
 
     return pc_target
+
+
+# ============================================================================
+# KAVİTE DURUM TÜREVİ (Lc, Dc, pc) — dynamics/model.py sözleşmesi
+# ============================================================================
+
+def cavity_state_derivative(Lc: float, Dc: float, pc: float, V: float, p_inf: float,
+                            Cq_in: float, Dn: float, model: str = "savchenko",
+                            k_g: float = K_G_CAVITY_DEFAULT, K_Dc: float = 1.0,
+                            K_Lc: float = 1.0, A_v: float = A_V_DEFAULT,
+                            tau_cav: float = CAVITY_TAU, tau_pc: float = TAU_PC,
+                            smooth: bool = False) -> dict:
+    """
+    Kavite durumlarının zaman türevi (legacy simulate() satır 547-651'in ODE formu).
+
+      σ_vapor   = 2(p∞ − p_v)/(ρV²)
+      σ_vent    = A_v / Cq            (Cq ≤ 1e-9 → ∞, havalandırma yok)
+      pc_target = p∞ − ½ρV²·min(σ_vapor, σ_vent)   ∈ [p_v, p∞ − 1]
+      dpc/dt    = (pc_target − pc)/τ_pc
+      σ         = 2(p∞ − pc)/(ρV²)
+      (Lc_ss, Dc_ss) = cavity_geometry(σ)  (σ < 1; aksi 0 — kavite yok)
+                        Şekil için her zaman disk Cx0=0.82 (legacy satır 630).
+      dLc/dt = (Lc_ss − Lc)/τ ,  dDc/dt = (Dc_ss − Dc)/τ
+
+    Durumlar girdi değişince sıfırlanmaz; sadece hedefe doğru gecikmeyle ilerler.
+
+    smooth=True: legacy σ = 1'de (Lc_ss, Dc_ss) ≈ (1.3 m, 0.29 m) → 0 sıçrıyor. Hedef
+    boyutlar smoothstep((1 − σ)/SIGMA_ONSET_WIDTH) ile σ → 1'de sürekli 0'a indirilir
+    (σ ≤ 1 − w'de legacy ile aynı).
+
+    Returns dict: dLc, dDc, dpc [SI/s], sigma (≤3'e kırpılmış, legacy çıktısı),
+        sigma_raw, sigma_vapor, sigma_vent, pc_target, Lc_ss, Dc_ss
+    """
+    V_safe = max(V, V_MIN)
+    rho_v2 = RHO * V_safe * V_safe
+
+    sigma_vapor = 2.0 * (p_inf - P_VAP) / rho_v2
+    sigma_vent = A_v / max(Cq_in, 1e-6) if Cq_in > 1e-9 else np.inf
+    sigma_hybrid = min(sigma_vapor, sigma_vent)
+
+    pc_target = p_inf - 0.5 * rho_v2 * sigma_hybrid
+    pc_target = min(max(pc_target, P_VAP), p_inf - 1.0)
+
+    pc_eff = max(pc, P_VAP)
+    dpc = (pc_target - pc) / max(tau_pc, 1e-6)
+
+    s = 2.0 * (p_inf - pc_eff) / rho_v2
+    if s < 1.0:
+        Lc_ss, Dc_ss, _ = cavity_geometry(s, Dn, model=model, Cx0=CX0_DISK,
+                                          k_g_val=k_g, K_Dc_val=K_Dc, K_Lc_val=K_Lc)
+        if smooth:
+            w = smoothstep((1.0 - s) / SIGMA_ONSET_WIDTH)
+            Lc_ss, Dc_ss = w * Lc_ss, w * Dc_ss
+    else:
+        Lc_ss, Dc_ss = 0.0, 0.0
+
+    tau_c = max(tau_cav, 1e-6)
+    return {
+        "dLc": (Lc_ss - Lc) / tau_c,
+        "dDc": (Dc_ss - Dc) / tau_c,
+        "dpc": dpc,
+        "sigma": min(s, 3.0),
+        "sigma_raw": s,
+        "sigma_vapor": sigma_vapor,
+        "sigma_vent": sigma_vent,
+        "pc_target": pc_target,
+        "Lc_ss": Lc_ss,
+        "Dc_ss": Dc_ss,
+    }
 
 
 # ============================================================================
