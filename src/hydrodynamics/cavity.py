@@ -349,6 +349,61 @@ def cavity_state_derivative(Lc: float, Dc: float, pc: float, V: float, p_inf: fl
 # HELPER: Cavity axis offset due to gravity and angle
 # ============================================================================
 
+def cavity_axis_offset_components(x: float, alpha_eff: float, beta: float, V: float,
+                                  k_dev: float = 0.4, x_open: float = None,
+                                  include_gravity: bool = False) -> tuple:
+    """
+    Kavite ekseninin gövde ekseninden sapması — İKİ bileşen (pitch + yaw düzlemi).
+
+    `cavity_axis_offset` yalnız pitch düzlemini verir ve çağıran yerler |h| kullanır
+    (gövde ıslanması, transom planing) — bu yüzden işaret oradan hiç sınanmamıştır.
+    Bu fonksiyon kanat ıslaklığı için gereken **işaretli, iki bileşenli** sapmayı
+    döndürür; kanatlar azimutta dağıldığı için hangi yöne kaydığı doğrudan hangi
+    kanadın ıslanacağını belirler (ve dolayısıyla K roll momentini).
+
+      h_z = k_dev·α_eff·x_open·(1 − exp(−x/x_open))   [+ g·x²/(2V²), include_gravity]
+      h_y = k_dev·β    ·x_open·(1 − exp(−x/x_open))
+
+    İşaret (açı terimi): kavite **akış doğrultusunu** izler, gövde eksenini değil.
+    α_eff > 0 (w > 0, akış yukarıdan geliyor) → kavite ekseni gövde ekseninin altına
+    kayar → h_z > 0 (z aşağı). β > 0 (v > 0, akış sancaktan) → h_y > 0 (y sancak).
+    Yaw düzlemi pitch'in simetriğidir (model.py konvansiyonu); yerçekimi yalnız
+    pitch düzlemine girer.
+
+    `include_gravity` VARSAYILAN OLARAK KAPALIDIR. Nedeni: yerçekimi teriminin işareti
+    bu projede çözülmemiştir — `cavity_axis_offset` docstring'i "h > 0 = kavite aşağı",
+    legacy GUI yorumu "yukarı" der ve her iki yolda da |h| kullanıldığı için sonuç
+    bugüne dek etkilenmedi. Kanat ıslaklığında işaret ÖNEMLİDİR: hangi kanat çifti
+    ıslanır, roll momentinin yönünü belirler. Üstelik terim baskındır (x = 3.8 m,
+    V = 30 m/s → 7.9 cm; aynı noktada 2° açı terimi 1.9 cm) — yanlış işaretle trim
+    kökten değişir. İşaret deneyle/CFD ile sabitlenmeden açmayın.
+
+    Args:
+        x: Kavitatörden eksenel uzaklık [m]
+        alpha_eff: Etkin kavitatör açısı = α + δc [rad]
+        beta: Yan kayma açısı [rad]
+        V: Hız [m/s]
+        k_dev: Sapma sönümleme çarpanı (0-1)
+        x_open: Logvinovich açılma ölçeği [m]; None/0 → açı terimi 0
+        include_gravity: True → h_z'ye g·x²/(2V²) eklenir (yukarıdaki uyarı)
+
+    Returns:
+        (h_y, h_z): Sapma bileşenleri [m]; +y sancak, +z aşağı
+    """
+    from .constants import G as G_const
+
+    if x_open is None or x_open < 1e-6:
+        shape = 0.0
+    else:
+        shape = x_open * (1.0 - np.exp(-max(x, 0.0) / x_open))
+    h_y = k_dev * beta * shape
+    h_z = k_dev * alpha_eff * shape
+    if include_gravity:
+        V_safe = max(V, V_MIN)
+        h_z += G_const * x * x / (2.0 * V_safe * V_safe)
+    return h_y, h_z
+
+
 def cavity_axis_offset(x: float, alpha_eff: float, V: float,
                        k_dev: float = 0.4, x_open: float = None) -> float:
     """

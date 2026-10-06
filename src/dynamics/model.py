@@ -41,6 +41,15 @@ REJİM GEÇİŞLERİ (legacy_exact)
     gövde kesit kapanması, ıslak yay bitişik↔serbest, transom teması ve tamamen
     dışarıda rejimi, kavitatör Cx(σ ≥ 1). Ayrıntı: hydrodynamics/smooth.py kullanan
     fonksiyonların docstring'leri; test_continuity.py.
+    Ayrıca TAM ISLAK (kavitasyon öncesi) rejim düzeltmeleri — süperkavitasyon
+    korelasyonlarının kavite yokken geçersiz olduğu iki terim:
+      * Burun direnci: Cx0·(1+σ) (Reichardt) gövdenin basınç direncini de kavitatöre
+        yükler → ancak gövde kavitenin içindeyken geçerli. Kavite gövdeden geniş
+        olana kadar (Dc/D ∈ [1, 1+w], w = cavity_estab_width) tam ıslak koni/disk
+        basınç direnci (cavitator.wetted_cavitator_Cx); arada harmanlanır.
+        Ölçüt σ değil kavite durumudur.
+      * Sürtünme: legacy sabit Cf = 0.003 → ITTC-57(Re)·(1+k)
+        (body.skin_friction_ittc).
 
 BİLİNEN BASİTLEŞTİRMELER
   * Drag gövde ekseni boyunca (−x) uygulanır (legacy gibi), hız vektörüne ters değil.
@@ -56,8 +65,9 @@ import numpy as np
 from src.hydrodynamics.constants import (
     RHO, G, P_ATM, P_VAP, CX0_DISK, CAVITY_TAU, TAU_PC, A_V_DEFAULT,
     FIN_CD0, FIN_OSWALD_E, FIN_STALL_ANGLE, CD_BASE_FULLY_WET,
-    CL_ALPHA_BODY_DEFAULT, K_DEV_DEFAULT,
+    CL_ALPHA_BODY_DEFAULT, K_DEV_DEFAULT, CAVITY_ESTAB_WIDTH,
 )
+from src.hydrodynamics.smooth import smoothstep
 from src.hydrodynamics import body as hbody
 from src.hydrodynamics import cavitator as hcav
 from src.hydrodynamics import cavity as hcavity
@@ -123,6 +133,16 @@ class VehicleModel:
                               → sürekli geçişler
       gas_flow_ref_depth [m]  Q-mod: gaz debisinin ölçüldüğü derinlik (hidrostatik p_ref);
                               gaz kavitede pc'ye genleşir. None (varsayılan) → legacy.
+      cavitator_Cx_wet        Kavite yokken (σ → 1) burun direnci katsayısı (Sn'ye göre).
+                              None (varsayılan) → burun geometrisinden türetilir
+                              (cavitator.wetted_cavitator_Cx; 40° koni → 0.20).
+                              Yalnız legacy_exact=False iken etkin.
+      cavity_estab_width      Burun direnci harmanlama genişliği: kavite gövdeden geniş
+                              olana kadar (Dc/D ∈ [1, 1+w]) ıslak Cx → Reichardt Cx0(1+σ)
+                              (varsayılan 0.5). Yalnız legacy_exact=False iken etkin.
+      friction_model          "ittc" (legacy_exact=False varsayılanı) → Cf = (1+k)·ITTC-57(Re);
+                              "constant" (legacy_exact=True varsayılanı) → legacy sabit Cf.
+      form_factor             (1+k) form + pürüzlülük çarpanı (varsayılan 1.1).
     Gövde orijini x_cg'dedir (kütle merkezi); x_cg_mass yok sayılır.
     """
 
@@ -155,6 +175,16 @@ class VehicleModel:
             self.Cx0 = hcav.conical_cavitator_Cx(CX0_DISK, self.cone_apex, K_v)
         else:
             self.Cx0 = CX0_DISK
+        # Kavite yokken (σ → 1) burun direnci: Reichardt Cx0·(1+σ) yerine tam ıslak
+        # koni/disk basınç direnci (bkz. cavitator.wetted_cavitator_Cx). Sadece
+        # legacy_exact=False iken kullanılır.
+        # Kavite "kurulmuş" sayılma genişliği: Dc/D ∈ [1, 1+w] (kalibrasyon parametresi)
+        self.cav_estab_w = max(float(p.get("cavity_estab_width", CAVITY_ESTAB_WIDTH)), 1e-3)
+        Cx_wet = p.get("cavitator_Cx_wet")
+        self.Cx_wet = (float(Cx_wet) if Cx_wet is not None else
+                       hcav.wetted_cavitator_Cx(
+                           self.cav_type,
+                           self.cone_apex if self.cav_type == "cone" else None))
         self.K_slender = _clip(p.get("K_slender", 1.0), 0.0, 2.0)
         self.K_cone_lift = _clip(p.get("K_cone_lift", 0.0), 0.0, 3.0)
         self.cone_lift_gain = _clip(p.get("cone_lift_gain", 0.0), 0.0, 2.0)
@@ -178,6 +208,10 @@ class VehicleModel:
         # Gövde
         self.CL_alpha_body = _clip(p.get("CL_alpha_body", CL_ALPHA_BODY_DEFAULT), 0.0, 6.28)
         self._body_params = dict(p, smooth_transitions=self.smooth)
+        # Sürtünme: sürekli modelde Re bağımlı ITTC-57, legacy_exact'te legacy sabit Cf.
+        # Config'teki açık "friction_model" anahtarı bu seçimi ezer.
+        if p.get("friction_model") is None:
+            self._body_params["friction_model"] = "ittc" if self.smooth else "constant"
         self.planing_enable = bool(p.get("planing_enable", False))
 
         # Kanatlar
@@ -191,6 +225,14 @@ class VehicleModel:
         self.R_v_fin = hbody.vehicle_radius(self.fin_x, self.R_n, self.R_v, self.L_taper)
         self.fin_x_body = self.x_cg - self.fin_x
         self._fin_normals = [fin_normal(np.radians(a)) for a in self.fin_az]
+        self._fin_r_force = np.zeros(len(self.fin_az))
+        # Kavite ekseni sapmasının kanat ıslaklığına etkisi (K roll momentinin kaynağı).
+        # Varsayılan: sürekli modelde açık, legacy_exact'te kapalı (legacy birebir).
+        fco = p.get("fin_cavity_offset")
+        self.fin_cav_offset = self.smooth if fco is None else bool(fco)
+        # Yerçekimi sagı ayrı anahtar: işareti çözülmemiş ve baskın (bkz.
+        # cavity.cavity_axis_offset_components docstring'i) → varsayılan KAPALI.
+        self.fin_cav_offset_gravity = bool(p.get("fin_cavity_offset_gravity", False))
 
     # ------------------------------------------------------------------
     def ambient_pressure(self, depth):
@@ -204,6 +246,47 @@ class VehicleModel:
         if Q > 1e-10 and V > V_FORCE_MIN and self.Dn > 1e-4:
             return Q / (V * self.Dn ** 2)
         return 0.0
+
+    def cavitator_Cx_geometry(self, s_raw, a_tot=0.0):
+        """
+        Kavite GEOMETRİSİ için kavitatör direnç katsayısı (legacy ile aynı; kuvvet için
+        kullanılan Cx_force'tan farklı — bkz. evaluate). Model ve tahminci ortak yolu.
+
+        Returns: (Cx_sc, Cx_i) — σ'ya bağlı katsayı ve cos²(a_tot) ile ölçeklenmişi.
+        """
+        if self.smooth:
+            # Cx0·(1+σ) σ ≥ 1'de doygun (legacy: σ ≥ 1'de Cx0'a yarıya SIÇRAR)
+            Cx_sc = self.Cx0 * (1.0 + min(s_raw, 1.0))
+        else:
+            Cx_sc = self.Cx0 * (1.0 + s_raw) if s_raw < 1.0 else self.Cx0
+        return Cx_sc, Cx_sc * np.cos(a_tot) ** 2
+
+    def fin_wet_geometry(self, Lc, Dc, alpha_eff, beta, V, Cx):
+        """
+        Kanat başına ıslak açıklık ve kuvvet yarıçapı — model ve tahminci ortak yolu.
+
+        Kavite ekseni akış doğrultusunu izler (α_eff, β ile gövde ekseninden kayar) →
+        kanatlar farklı ıslanır → K (roll) momenti doğar. `fin_cavity_offset` kapalıysa
+        eş merkezli (eski) geometri kullanılır ve sonuç birebir eskisiyle aynıdır.
+
+        Returns: (spans, radii, h_y, h_z) — açıklıklar [m], kuvvet yarıçapları [m], sapma [m]
+        """
+        x_fin = self.fin_x + self.x_body_start
+        R_c = hfins.cavity_radius_ellipse(x_fin, Lc, Dc)
+        if self.fin_cav_offset:
+            h_y, h_z = hcavity.cavity_axis_offset_components(
+                x_fin, alpha_eff, beta, V, k_dev=self.k_dev,
+                x_open=hbody.cavity_opening_length(self.R_n, Cx),
+                include_gravity=self.fin_cav_offset_gravity)
+        else:
+            h_y = h_z = 0.0
+        n = len(self.fin_az)
+        spans = np.empty(n)
+        radii = np.empty(n)
+        for i, az in enumerate(self.fin_az):
+            spans[i], radii[i] = hfins.fin_wetted_segment(
+                R_c, self.R_v_fin, self.fin_span, np.radians(az), h_y, h_z)
+        return spans, radii, h_y, h_z
 
     def cavity_derivative(self, Lc, Dc, pc, V, depth, gas_flow):
         """(Cq, kavite türev sözlüğü) — model ve tahminci (control/estimator.py) ortak yolu."""
@@ -245,13 +328,22 @@ class VehicleModel:
         a_z = alpha + delta_c
         a_y = beta
         a_tot = np.hypot(a_z, a_y)
+        Cx_sc, Cx_i = self.cavitator_Cx_geometry(s_raw, a_tot)   # Cx_i: kavite GEOMETRİSİ
+        cos2 = np.cos(a_tot) ** 2
         if self.smooth:
-            # Cx0·(1+σ) σ ≥ 1'de doygun (legacy: σ ≥ 1'de Cx0'a yarıya SIÇRAR)
-            Cx_i = self.Cx0 * (1.0 + min(s_raw, 1.0))
+            # Kuvvet için: Reichardt Cx0·(1+σ) (gövdenin basınç direncini de kavitatöre
+            # yükleyen süperkavite yasası) ancak gövde kavitenin içindeyken geçerlidir →
+            # kavite gövdeden geniş olana kadar (Dc/D ∈ [1, 1+w], w = cavity_estab_width)
+            # tam ıslak burun basınç direnci (Cx_wet) kullanılır; arada harmanlanır.
+            # Ölçüt σ DEĞİL kavite DURUMUDUR: σ hem V arttıkça kavite yokken düşer
+            # (V = 25 m/s'de t = 0'da σ = 0.62) hem de havalandırma başlar başlamaz ms'ler
+            # içinde düşer → σ tabanlı eşik düzeltmeyi kavite oluşmadan kapatıyordu.
+            w_cav = smoothstep((Dc / self.D - 1.0) / self.cav_estab_w)
+            Cx_force = (w_cav * Cx_sc + (1.0 - w_cav) * self.Cx_wet) * cos2
         else:
-            Cx_i = self.Cx0 * (1.0 + s_raw) if s_raw < 1.0 else self.Cx0
-        Cx_i *= np.cos(a_tot) ** 2
-        F_cav = q * self.S_n * Cx_i * np.cos(a_tot)
+            w_cav = 1.0
+            Cx_force = Cx_i
+        F_cav = q * self.S_n * Cx_force * np.cos(a_tot)
         CL_cav = hcav.cavitator_lift_coefficient(
             max(sigma, 0.001), self.cav_type,
             self.cone_apex if self.cav_type == "cone" else None,
@@ -282,11 +374,11 @@ class VehicleModel:
         # ---- Transom planing / taban basınç sürüklemesi ----
         planing_regime = "fully_wet"
         F_planing = 0.0
+        x_open = hbody.cavity_opening_length(self.R_n, Cx_i)
         if self.smooth or (Lc > 1e-4 and Dc > 1e-4):
             x_tail = self.L + self.x_body_start
             rc_tail = hbody.cavity_radius_logvinovich(x_tail, Lc, Dc, self.R_n, Cx_i,
                                                       smooth_closure=self.smooth)
-            x_open = hbody.cavity_opening_length(self.R_n, Cx_i)
             if V > V_FORCE_MIN:
                 h_tail = hcavity.cavity_axis_offset(x_tail, a_z, V, k_dev=self.k_dev,
                                                     x_open=x_open)
@@ -308,23 +400,31 @@ class VehicleModel:
         deltas = fin_mixer(u.delta_e, u.delta_r, self.fin_az)
         F_fin_up = F_fin_side = F_fin_drag = 0.0
         wet_span = 0.0
+        h_y = h_z = 0.0
+        spans = np.zeros(len(self.fin_az))
         if self.fins_enabled and self.fin_chord > 1e-6 and self.fin_span > 1e-6 and V > V_FORCE_MIN:
             Lc_f, Dc_f = (cav["Lc_ss"], cav["Dc_ss"]) if self.fins_use_steady_cavity else (Lc, Dc)
-            R_c = hfins.cavity_radius_ellipse(self.fin_x + self.x_body_start, Lc_f, Dc_f)
-            wet_span = hfins.fin_immersion_ratio(max(R_c, self.R_v_fin), self.R_v_fin,
-                                                 self.fin_span)
-            if wet_span > 1e-6:
-                S_wet = self.fin_chord * wet_span
-                r_mid = self.R_v_fin + self.fin_span - 0.5 * wet_span
-                v_lin = x[SL_NU_LIN]
-                for n, az, d_i in zip(self._fin_normals, self.fin_az, deltas):
+            # Kavite ekseni sapması: kanat başına farklı ıslaklık → K (roll) momenti.
+            # Tahminci (control/estimator.py) aynı yolu kullanır (kendi kavite tahminiyle).
+            spans, radii, h_y, h_z = self.fin_wet_geometry(Lc_f, Dc_f, a_z, beta, V, Cx_i)
+            self._fin_r_force[:] = radii
+            v_lin = x[SL_NU_LIN]
+            # Tanıda/otopilot etkinliğinde (eta) tek skaler açıklık: kanat ortalaması
+            # (sapma yokken dördü de aynı → eski değer birebir korunur)
+            wet_span = float(spans.mean())
+            if spans.max() > 1e-6:
+                for i, (n, az, d_i) in enumerate(zip(self._fin_normals, self.fin_az, deltas)):
+                    w_i = spans[i]
+                    if w_i <= 1e-6:
+                        continue
                     a = np.radians(az)
-                    r = np.array([self.fin_x_body, r_mid * np.cos(a), -r_mid * np.sin(a)])
+                    r_i = self._fin_r_force[i]
+                    r = np.array([self.fin_x_body, r_i * np.cos(a), -r_i * np.sin(a)])
                     v_loc = v_lin + np.cross(omega, r)
                     a_loc = np.arctan2(v_loc @ n, max(v_loc[0], 1e-6))
                     a_fin = _clip(a_loc + d_i, -FIN_STALL_ANGLE, FIN_STALL_ANGLE)
                     L_fin, D_fin = hfins.fin_lift_and_drag(
-                        V, self.fin_chord, wet_span, self.fin_CL_alpha, a_fin,
+                        V, self.fin_chord, w_i, self.fin_CL_alpha, a_fin,
                         span_for_AR=self.fin_span)
                     f = -L_fin * n + np.array([-D_fin, 0.0, 0.0])
                     add(f, r)
@@ -355,7 +455,8 @@ class VehicleModel:
             "V": V, "alpha": alpha, "beta": beta, "q": q, "p_inf": p_inf,
             "sigma": sigma, "sigma_vapor": cav["sigma_vapor"], "Cq": Cq,
             "pc_target": cav["pc_target"], "Lc_ss": cav["Lc_ss"], "Dc_ss": cav["Dc_ss"],
-            "Cx": Cx_i, "alpha_eff": a_z,
+            "Cx": Cx_i, "Cx_force": Cx_force, "cav_estab": w_cav,
+            "alpha_eff": a_z, "Cf": bf["Cf"],
             # sürükleme bileşenleri (geri yönlü +)
             "F_cav": F_cav, "F_skin": bf["F_skin"], "F_press": F_press,
             "F_body_drag": F_body_drag, "F_fin_drag": F_fin_drag,
@@ -366,6 +467,9 @@ class VehicleModel:
             # yan (iskele +)
             "F_cavy": F_cavy, "F_body_side": F_body_side, "F_fin_side": F_fin_side,
             "cover": bf["cover"], "wet_frac": wet_frac, "fin_wet_span": wet_span,
+            # kanat başına ıslak açıklık + kavite ekseni sapması (K roll kaynağı)
+            "fin_wet_spans": tuple(float(v) for v in spans),
+            "cav_h_y": float(h_y), "cav_h_z": float(h_z),
             "planing_regime": planing_regime,
             "delta_fins": deltas,
             # gövde çerçevesi toplamları

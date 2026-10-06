@@ -196,6 +196,87 @@ def fin_aoa_effective(alpha_aoa: float, delta_fin: float, azimuth: float) -> flo
     return alpha_eff
 
 
+def fin_wetted_segment(R_cavity: float, R_root: float, fin_span: float,
+                       az_rad: float, h_y: float = 0.0, h_z: float = 0.0) -> tuple:
+    """
+    Kanadın ıslak açıklığı ve kuvvet yarıçapı — kavite ekseni GÖVDE EKSENİNDEN SAPMIŞKEN.
+
+    `fin_immersion_ratio` kaviteyi gövdeyle eş merkezli varsayar; o durumda dört kanat
+    aynı ıslaklığı görür ve roll katkıları birebir sönümlenir (K ≡ 0). Kavite kesiti
+    gerçekte akış doğrultusunu izler: α_eff ve β ile gövde ekseninden (h_y, h_z) kadar
+    kayar (bkz. cavity.cavity_axis_offset_components) → her kanat farklı ıslaklık görür
+    → β'dan ve α'dan doğal roll momenti doğar.
+
+    Geometri (gövde çerçevesi y-z kesiti, y sancak, z aşağı):
+      Kanat ışını:  P(s) = s·e,  e = (cos az, −sin az),  s ∈ [R_root, R_root + span]
+      Kavite kesiti: |P − C| = R_cavity,  C = (h_y, h_z)
+      |s·e − C|² = R_c²  →  s² − 2s(e·C) + |C|² − R_c² = 0
+      d = e·C,  disc = R_c² − (|C|² − d²) = R_c² − (C'nin ışına dik uzaklığı)²
+      disc ≤ 0 → ışın kaviteye hiç girmez (kanat tamamen ıslak)
+      disc > 0 → kuru aralık s ∈ [d − √disc, d + √disc]
+
+    Islak küme [R_root, R_tip] fark [s1, s2] olduğundan **iki parçalı** olabilir: kavite
+    kanadın orta bandını örtüp kökü ve ucu suda bırakabilir (çok sapmış kavite).
+    Kuvvet için toplam ıslak uzunluk ve (sabit veter varsayımıyla) alan merkezi döner.
+
+    h_y = h_z = 0'da sonuç `fin_immersion_ratio` + legacy r_mid ile **birebir** aynıdır
+    (eş merkezli dal ayrıca kısa yoldan hesaplanır → bit düzeyinde aynı).
+
+    Süreklilik: wet_span her yerde süreklidir, ancak kanat ışını kavite çemberine TEĞET
+    geçerken kuru aralık 2·√disc ile açıldığı için o noktada **dikey teğetli**dir (sonsuz
+    eğim; çember kirişinin gerçek geometrisi — kavite kapanma profilindeki aynı desen,
+    bkz. body.cavity_radius_logvinovich). Teğetlik ancak sapma kanat açıklığı ölçeğine
+    (|h| ≳ 0.4 m) çıkınca oluşur; çalışma aralığında (2°'de h ≈ 0.02 m) fonksiyon
+    Lipschitz'tir (|Δwet| ≤ |Δh|). Bkz. test_fin_offset.py bölüm A8.
+
+    Args:
+        R_cavity: Kanat istasyonundaki kavite yarıçapı [m]
+        R_root: Kanat kökü yarıçapı = o istasyondaki gövde yarıçapı [m]
+        fin_span: Kanat açıklığı (kök → uç) [m]
+        az_rad: Kanat azimutu [rad] (0 = sancak, π/2 = üst; gövde: y sancak, z aşağı)
+        h_y, h_z: Kavite ekseninin gövde ekseninden sapması [m] (+y sancak, +z aşağı)
+
+    Returns:
+        (wet_span, r_force): Islak açıklık [m] ∈ [0, fin_span] ve kuvvetin etkidiği
+                             yarıçap [m] (ıslak kısmın alan merkezi; ıslak değilse
+                             kök + açıklık/2 — kuvvet sıfır olduğu için önemsiz)
+
+    İşaret: wet_span ≥ 0, r_force > 0.
+    """
+    R_c = max(float(R_cavity), 0.0)
+    R_root = max(float(R_root), 0.0)
+    span = max(float(fin_span), 0.0)
+    r_tip = R_root + span
+    if span <= 0.0:
+        return 0.0, r_tip
+
+    # Eş merkezli kavite: legacy yolla birebir aynı kalsın (bit düzeyinde)
+    if h_y == 0.0 and h_z == 0.0:
+        wet = fin_immersion_ratio(max(R_c, R_root), R_root, span)
+        return wet, r_tip - 0.5 * wet
+
+    d = h_y * np.cos(az_rad) - h_z * np.sin(az_rad)
+    C2 = h_y * h_y + h_z * h_z
+    disc = R_c * R_c - max(C2 - d * d, 0.0)
+    if disc <= 0.0:
+        # Kanat ışını kavite kesitini hiç kesmiyor → tamamen ıslak
+        return span, r_tip - 0.5 * span
+
+    root_disc = np.sqrt(disc)
+    s1, s2 = d - root_disc, d + root_disc          # kuru aralık
+
+    # [R_root, r_tip] fark [s1, s2] → en çok iki parça (iç: kök tarafı, dış: uç tarafı)
+    wet = 0.0
+    moment = 0.0
+    for lo, hi in ((R_root, min(r_tip, s1)), (max(R_root, s2), r_tip)):
+        if hi > lo:
+            wet += hi - lo
+            moment += 0.5 * (lo + hi) * (hi - lo)
+    if wet <= 0.0:
+        return 0.0, r_tip - 0.5 * span
+    return min(wet, span), moment / wet
+
+
 def cavity_radius_ellipse(x_cav: float, Lc: float, Dc: float) -> float:
     """
     Kanat konumundaki kavite yarıçapı — elipsoid yaklaşımı (legacy satır 971-977).

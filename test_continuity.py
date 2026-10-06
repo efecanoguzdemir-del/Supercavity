@@ -41,7 +41,8 @@ RATIO_MIN = 1.25
 # büyüklük -> mutlak eşik (bu kadar küçük farklar sıçrama sayılmaz)
 ABS_TOL = {"F_x": 2.0, "F_z": 2.0, "M_y": 2.0, "F_skin": 2.0, "F_press": 2.0,
            "F_planing": 2.0, "F_buoy": 1.0, "F_body_lift": 1.0, "F_fin_total": 2.0,
-           "cover": 1e-3, "F_cav": 2.0, "Cx": 1e-4, "Lc_ss": 1e-3, "Dc_ss": 1e-4, "dLc": 1e-2}
+           "cover": 1e-3, "F_cav": 2.0, "Cx": 1e-4, "Cx_force": 1e-4, "Lc_ss": 1e-3,
+           "Dc_ss": 1e-4, "dLc": 1e-2}
 
 
 def check(name, ok, info=""):
@@ -55,7 +56,8 @@ def quantities(model, x, u):
             "F_skin": d["F_skin"], "F_press": d["F_press"], "F_planing": d["F_planing"],
             "F_buoy": d["F_buoy"], "F_body_lift": d["F_body_lift"],
             "F_fin_total": d["F_fin_total"], "cover": d["cover"], "F_cav": d["F_cav"],
-            "Cx": d["Cx"], "Lc_ss": d["Lc_ss"], "Dc_ss": d["Dc_ss"], "dLc": xdot[IDX_LC]}
+            "Cx": d["Cx"], "Cx_force": d["Cx_force"], "Lc_ss": d["Lc_ss"],
+            "Dc_ss": d["Dc_ss"], "dLc": xdot[IDX_LC]}
 
 
 def sweep(model, lo, hi, n, make_x, u):
@@ -135,7 +137,7 @@ def run_all(model, u, u_nogas):
         out.append((label, analyze(model, label, lo, hi, make_x, u, keys)))
     out.append(("σ 0.6→1.6 (V=12, gazsız): kavite oluşum eşiği σ=1",
                 analyze(model, "sigma", 0.6, 1.6, sigma_sweep_state(model), u_nogas,
-                        ["Lc_ss", "Dc_ss", "Cx", "F_cav", "dLc"])))
+                        ["Lc_ss", "Dc_ss", "Cx", "Cx_force", "F_cav", "dLc"])))
     return out
 
 

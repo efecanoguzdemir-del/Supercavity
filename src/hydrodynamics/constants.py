@@ -24,8 +24,9 @@ G = 9.81            # Gravitational acceleration [m/s²]
 P_ATM = 101325.0    # Atmospheric pressure (sea level) [Pa]
 P_VAP = 2340.0      # Water vapor pressure [Pa]
 
-# Dinamik viskozite (15°C seawater) — çoğunlukla kullanılmaz ama referans
+# Dinamik viskozite (15°C seawater)
 MU_WATER = 1.19e-3  # Dynamic viscosity [Pa·s]
+NU_WATER = MU_WATER / RHO   # Kinematik viskozite [m²/s] ≈ 1.161e-6 (ITTC-57 Re için)
 
 # ============================================================================
 # TEKILLIK (SINGULARITY) KORUMA GÜARDLARİ
@@ -75,12 +76,49 @@ K_LEAK = 0.15                      # Epshtein twin-vortex leakage (0.1-0.3)
 
 CL_ALPHA_BODY_DEFAULT = 1.5        # Munk slender body lift slope factor
 CDC_BODY_DEFAULT = 0.4             # Body crossflow drag coefficient (low-α)
-CF_SKIN = 0.003                    # Wetted-body skin friction coefficient (legacy Cf)
+CF_SKIN = 0.003                    # Wetted-body skin friction coefficient (legacy Cf, sabit)
+# ITTC-57 sürtünme modeli (friction_model="ittc"; legacy_exact=False varsayılanı):
+#   Cf = (1+k)·0.075/(log10(Re) − 2)²,  Re = V·L/ν
+# Sabit 0.003 legacy'den gelir ve Re bağımsızdır: V=20 m/s, L=4 m'de (Re=6.9e7) ITTC
+# 0.00220 verir → legacy %36 yüksek; V=40'ta (Re=1.4e8) 0.00199 → %51 yüksek. Tam ıslak
+# başlangıç koşulunda CFD ile karşılaştırmada bu fark X kuvvetinin ~%6'sıydı.
+FORM_FACTOR_DEFAULT = 1.1          # (1+k): gövde form etkisi (Hoerner L/D=13 için ~1.03)
+                                   # + pürüzlülük payı (ITTC ΔCf ≈ 3e-4) ≈ 1.1
+RE_MIN_FRICTION = 1.0e5            # ITTC formülünün alt sınırı (V→0 koruması)
 CDC_CROSSFLOW_SECTION = 1.2        # Hoerner crossflow Cdc used in per-section body integral
 N_BODY_SECTIONS = 40               # Number of axial body sections (legacy n_x)
 CAVITY_TAU = 0.15                  # Cavity Lc/Dc first-order lag time constant [s] (legacy tau)
 CD_BASE_EXPOSED = 0.20             # Transom tamamen kavite dışında: taban basınç sürüklemesi (legacy)
 CD_BASE_FULLY_WET = 0.15           # Kavite hiç yok (tam ıslak): taban basınç sürüklemesi (legacy)
+
+# ============================================================================
+# KAVİTE YOKKEN (TAM ISLAK) KAVİTATÖR/BURUN DİRENCİ
+# ============================================================================
+# Cx = Cx0·(1+σ) (Reichardt) kavitatörün ARKASINDA kavite varken geçerlidir: taban
+# basıncı pc'dir ve σ ≲ 0.3-0.5 aralığında doğrulanmıştır. Kavite yokken (σ → 1,
+# havalandırma başlamadan) burun ayrılmamış ıslak akış içindedir ve direnci klasik
+# koni/disk basınç direncidir — Reichardt ekstrapolasyonundan belirgin biçimde düşük.
+# Hoerner, Fluid-Dynamic Drag (Bölüm 3, koni direnci; taban alanına göre, Re ~ 1e6+):
+CONE_CD_WET_APEX_DEG = (0.0, 20.0, 30.0, 40.0, 60.0, 90.0, 120.0, 180.0)
+CONE_CD_WET_TABLE = (0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 0.80, 1.17)
+CD_DISK_WET = 1.17                 # Tam ıslak düz disk (β=180°) — tablonun uç değeri
+
+# Kavitenin "kurulmuş" sayıldığı ölçüt (burun direnci harmanlaması, smooth_transitions):
+# Klasik süperkavite direnç yasasında Cx0·(1+σ) kavitatör direncine gövdenin basınç
+# direncinin tamamı yüklenir; bu ancak gövde kavitenin İÇİNDEYKEN, yani kavite gövdeden
+# geniş olduğunda (Dc > D) geçerlidir. Dc < D iken kavite ön gövde üzerinde kapanan bir
+# "kısmi kavite"dir, akış gövdeye yeniden yapışır ve burun pratikte ıslak akıştadır →
+# tam ıslak koni/disk basınç direnci (cavitator.wetted_cavitator_Cx) kullanılır.
+# Harmanlama Dc/D ∈ [1, 1+w] aralığında yapılır.
+#
+# Ölçüt σ DEĞİL kavite DURUMUDUR. σ tabanlı eşik (eski hali) iki yerde kırılıyordu:
+#   * σ hız arttıkça kavite yokken de düşer — V = 25 m/s'de t = 0'da σ = 0.62 → düzeltme
+#     hiç devreye girmiyordu (başlangıç direnci %20 yüksek).
+#   * Havalandırma başlar başlamaz pc yükselip σ ms'ler içinde düşüyor → düzeltme
+#     V = 20 m/s'de ~30 ms'de kapanıyor, sürükleme %23 geri sıçrıyordu.
+# Referans: Dc = D (= 1.5·Dn, Case 1) yaklaşık σ ≈ 0.39'a, Dc = 1.5·D ise σ ≈ 0.24'e
+# denk gelir — Reichardt'ın doğrulandığı σ ≲ 0.3-0.5 bandı.
+CAVITY_ESTAB_WIDTH = 0.5
 
 # Sürekli geçiş genişlikleri (smooth_transitions=True; legacy_exact modunda kullanılmaz)
 SIGMA_ONSET_WIDTH = 0.2            # Lc_ss, Dc_ss: σ ∈ [1−w, 1] aralığında 0'a iner

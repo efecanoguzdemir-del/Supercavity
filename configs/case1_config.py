@@ -28,9 +28,36 @@ VEHICLE = dict(
     gas_flow_ref_depth=5.0,
     # gövde
     CL_alpha_body=2.5, Cdc_body=0.4,
+    # Tam ıslak (kavitasyon öncesi) rejim — CFD ile kıyas düzeltmesi (2026-10-05).
+    # Süperkavitasyon korelasyonları kavite yokken geçerli değil; yalnız legacy_exact=False
+    # iken etkin (legacy senaryoları etkilenmez):
+    #   cavitator_Cx_wet: kavite yokken burun direnci (Sn'ye göre). None → geometriden
+    #     (cavitator.wetted_cavitator_Cx; 40° koni → 0.20). Reichardt σ=0.97'de 0.446
+    #     verirdi → burun direnci iki kat sayılıyordu.
+    #   cavity_estab_width: ıslak burun → Reichardt harmanlama genişliği; süperkavite
+    #     direnç yasası ancak kavite gövdeden genişken geçerli → Dc/D ∈ [1, 1+w]
+    #     (varsayılan 0.5). Ölçüt σ DEĞİL kavite durumu: σ, V=25 m/s'de t=0'da zaten 0.62
+    #     ve ventilasyon başlar başlamaz ms'ler içinde düşüyor → σ tabanlı eşik düzeltmeyi
+    #     V=25'te hiç açmıyor, V=20'de ~30 ms'de kapatıyordu (%23 geri sıçrama).
+    #   form_factor: ITTC-57 sürtünmesinde (1+k) form + pürüzlülük çarpanı. Sürtünme
+    #     modeli legacy_exact'ten türetilir ("ittc"/"constant"); friction_model ile ezilir.
+    cavitator_Cx_wet=None, cavity_estab_width=0.5, form_factor=1.1,
     # kanatlar (artı düzen: sağ/sol elevator, üst/alt rudder)
     fins_enabled=True, fin_chord=0.10, fin_span=0.25, fin_x_pos=3.80,
     fins_use_steady_cavity=False,
+    # Kavite ekseni sapmasının kanat ıslaklığına etkisi — K (roll) momentinin kaynağı.
+    # Eş merkezli kavite varsayımında dört kanat aynı ıslaklığı görür ve roll katkıları
+    # birebir sönümlenir (K ≡ 0). Kavite akış doğrultusunu izlediği için α_eff ve β ile
+    # gövde ekseninden kayar → kanatlar farklı ıslanır → K doğar. Pitch veya yaw TEK
+    # başına roll üretmez (simetri); α·δr, β·δe ve α·β çaprazları üretir.
+    #   fin_cavity_offset: None → legacy_exact'ten (False iken açık). Açıkken
+    #     otopilot koşumlarında |φ|max ~0.4-0.5°, |K|max ~20 N·m; kanat roll sönümü
+    #     (K_p ≈ -350 N·m·s/rad) tek başına yeterli, roll kontrolü gerekmiyor.
+    #   fin_cavity_offset_gravity: kavitenin yerçekimi sagı (g·x²/2V² = 7.9 cm @ 3.8 m,
+    #     30 m/s — açı teriminin 4 katı). İŞARETİ ÇÖZÜLMEDİ (docstring "aşağı", legacy
+    #     yorumu "yukarı"; bugüne dek |h| kullanıldığı için fark etmiyordu) → KAPALI.
+    #     Deney/CFD ile işaret sabitlenmeden açılmamalı.
+    fin_cavity_offset=None, fin_cavity_offset_gravity=False,
     # planing
     planing_enable=True,
     # False: rejim geçişleri sürekli (varsayılan); True: legacy anahtarlamaları birebir

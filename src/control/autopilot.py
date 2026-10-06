@@ -40,7 +40,7 @@ import numpy as np
 
 from src.dynamics.blocks import Controller, schedule_value
 from src.dynamics.model import ControlInput
-from src.dynamics.kinematics import kinematics_derivative
+from src.dynamics.kinematics import flow_angles, kinematics_derivative
 from src.dynamics.state import (IDX_P, IDX_Q, IDX_R, IDX_PHI, IDX_THETA, IDX_PSI, IDX_Z,
                                 IDX_LC, IDX_DC, IDX_PC, SL_NU_LIN)
 
@@ -279,10 +279,14 @@ class AttitudeAutopilot(Controller):
         meas = self.sensors.measure(x) if self.sensors is not None else {}
         eta = None
         if self.estimator is not None:
+            # Akış açıları: kavite ekseni sapmasının kanat ıslaklığına etkisi için
+            # (modelle aynı geometri). Yeni ölçüm değil — durum zaten elde.
+            _, alpha_m, beta_m = flow_angles(*x[SL_NU_LIN])
             eta = self.estimator.update(
                 dt, V, x[IDX_Z], gas,
                 pc_meas=meas.get("pc") if self.use_pc else None,
-                tail_gas=meas.get("tail_gas") if self.use_tail else None)
+                tail_gas=meas.get("tail_gas") if self.use_tail else None,
+                alpha_eff=alpha_m + u_ol["delta_c"], beta=beta_m)
         k_s = self.gain_scale(V, eta)
 
         if self.ff is not None and self.n_calls % self.ff["every"] == 0:

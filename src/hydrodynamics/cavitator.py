@@ -17,7 +17,8 @@ Disk ve konik kavitatörler için viskoz düzeltme.
 import numpy as np
 from .constants import (
     V_MIN, SIGMA_MIN,
-    CX0_DISK, K_SLENDER_DEFAULT, RHO
+    CX0_DISK, K_SLENDER_DEFAULT, RHO,
+    CONE_CD_WET_APEX_DEG, CONE_CD_WET_TABLE, CD_DISK_WET,
 )
 
 
@@ -88,6 +89,36 @@ def cavitator_drag(V: float, Dn: float, Cx: float, alpha_eff: float) -> float:
     # Normal force fully aligned with flow for cos²(α) already included
     return F_n  # = q·Sn·Cx·cos²(α_eff)
 
+
+
+def wetted_cavitator_Cx(cav_type: str = "disk", cone_apex_rad: float = None) -> float:
+    """
+    Kavite YOKKEN (tam ıslak, ayrılmamış akış) kavitatör/burun basınç direnci katsayısı.
+
+    Cx = Cx0·(1+σ) (Reichardt) kavitatörün arkasında kavite varken geçerlidir: taban
+    basıncı kavite basıncı pc'dir. Havalandırma başlamadan önce (σ → 1, Lc = Dc = 0)
+    burun ıslak akış içindedir; direnci klasik koni/disk basınç direncidir. Bu fark
+    tam ıslak başlangıç koşulunda baskındır: 40° koni, σ = 0.97'de Reichardt
+    0.82·(sin²20° + 0.18·cos²20°)·1.97 = 0.446 verir, ıslak değer ise 0.20 —
+    iki kat fazla burun direnci.
+
+    Veri: Hoerner, Fluid-Dynamic Drag (koni direnci, tepe açısına karşı; taban alanına
+    göre, Re ~ 1e6+). Tepe açıları arasında doğrusal interpolasyon; β = 180° sınırında
+    düz disk değeri (1.17) elde edilir.
+
+    Args:
+        cav_type: "disk" veya "cone"
+        cone_apex_rad: Koni TAM tepe açısı β [rad] (koni değilse None)
+
+    Returns:
+        Cx_wet: Kavitatör taban alanına (Sn = πRn²) göre direnç katsayısı [-]
+
+    İşaret: Cx_wet > 0 (direnç akışa karşı).
+    """
+    if cav_type != "cone" or cone_apex_rad is None:
+        return CD_DISK_WET
+    apex_deg = float(np.degrees(cone_apex_rad))
+    return float(np.interp(apex_deg, CONE_CD_WET_APEX_DEG, CONE_CD_WET_TABLE))
 
 def cavitator_lift_coefficient(sigma: float, cav_type: str = "disk",
                                 cone_apex_rad: float = None,

@@ -1,12 +1,35 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Süperkavitasyon Kapalı Çevrim Simülatörü
 
 Yapay süperkavitasyon oluşumu sırasında bir su altı aracının 6-DOF kinetiğini/kinematiğini hesaplayan, kapalı çevrim otopilotlu (1 ms'de bir komut; sadece yaw + pitch) modüler Python simülatörü. Referans: `supercavitation_gui_LIVE_v10.py` (legacy Tkinter GUI — **değiştirme**, sadece referans). Orijinal plan: `docs/plan.md` ve `GeçişFazı.txt` (eskidi: 14 durum, pasif roll vb.; çelişki olursa bu dosya geçerli — kullanıcı teyit etti).
 
-**Kullanıcı kararları (2026-09-15):** Roll kontrolü **yok/gereksiz** — otopilot yalnızca pitch ve yaw komutlar; mixer (δe, δr) → 4 fin. p ve φ yine de durum olarak kalır (pasif, hafif sönümlü; lateral kuvvetlerin roll'a etkisi görünsün). Dc ayrı durum (15 durum) onaylandı. Otopilot ayrık, 1 ms periyotlu, kapalı çevrim.
+**Kullanıcı kararları (2026-09-15):** Roll kontrolü **yok/gereksiz** — otopilot yalnızca pitch ve yaw komutlar; mixer (δe, δr) → 4 fin. p ve φ yine de durum olarak kalır (pasif, hafif sönümlü; lateral kuvvetlerin roll'a etkisi görünsün — 2026-10-06'dan beri fiziksel bir K kaynağı var, bkz. "Kavite ekseni sapması"; kapalı çevrimde |φ|max ≈ 0.4° → karar geçerli). Dc ayrı durum (15 durum) onaylandı. Otopilot ayrık, 1 ms periyotlu, kapalı çevrim.
 
 ## Ortam
 - Python + `pip install -r requirements.txt` (numpy, scipy, matplotlib). pytest yok; testler proje kökünde düz script (`python test_xxx.py`, exit 0 = geçti). Windows'ta çıktı yönlendirilirken `PYTHONUTF8=1` gerekir (yoksa Unicode print'te UnicodeEncodeError).
 - Legacy GUI'yi GUI açmadan çalıştırmak için: `python src/validation/legacy_reference.py` (matplotlib'i mock'layıp `simulate()`'i Case 1 ile çağırır).
+- Git kimliği tanımlı değil: `git -c user.name="oguz.demir" -c user.email="efecanoguzdemir@gmail.com" commit ...`. Uzak depo: https://github.com/efecanoguzdemir-del/Supercavity (`main`). `outputs/` commit edilmez.
+
+## Komutlar
+```bash
+export PYTHONUTF8=1                       # Windows'ta çıktı yönlendirilecekse
+python test_model.py                      # tek test dosyası = tek "test"; bölüm seçme yok
+for f in test_rigid_body test_hydrodynamics_units test_body_forces test_continuity test_model test_simulator test_fin_offset test_autopilot; do python $f.py > /dev/null || echo "FAIL $f"; done
+# test_hydrodynamics_legacy.py bilinen başarısız (bkz. Durum). test_autopilot.py ~5-10 dk sürer.
+python src/simulation/run_simulation.py --config configs/case1_config.py --scenario otopilot_derinlik [--scenario ...] [--no-plots] [--verbose]
+python src/control/tuning.py --scenario otopilot_derinlik --times ... --starts N [--skip-inner] [--skip-depth] --out f.json
+```
+Lint/build adımı yok.
+
+## Mimari (veri akışı)
+- **Config** (`configs/case1_config.py`): `VEHICLE` (geometri + model anahtarları), `SIMULATION`, `SCENARIOS` listesi. Her senaryo `name, initial(V, alpha_deg, depth), control, [vehicle], [simulation], [locked_states]` içerir; senaryodaki `vehicle`/`simulation` sözlükleri üst düzeyin üzerine yazılır. `control.type`: `"schedule"` (zamana bağlı δe/δr/δc/itki/gaz tabloları) veya `"autopilot"`.
+- **CLI** `run_simulation.py`: config'i yükler → `VehicleModel(**vehicle)` + `build_controller(spec, vehicle)` → `Simulator.run(x0)` → `postprocess` (CSV, özet, PNG).
+- **Simülatör** (`simulator.py`): sabit adımlı RK4; kontrolcü `Controller.update(t, x) → ControlInput` her `dt_control`'de çağrılır ve adım boyunca sabit tutulur (ZOH). `locked_states` türevleri sıfırlar. Kontrolcünün `log` sözlüğü `ctrl_*` tanı sütunlarına yazılır.
+- **Model** (`VehicleModel.evaluate(t, x, u) → (ẋ, diag)`): durumdan akış açıları → `hydrodynamics/` fonksiyonları (legacy işaretleri) → gövde çerçevesine dönüşüm + moment → `rigid_body` + `kinematics` → kavite ODE (`cavity_derivative`). `diag` tüm kuvvet bileşenlerini taşır; testler ve grafikler buna dayanır.
+- **Kontrol** (`control/`): `AttitudeAutopilot` modelin kavite yolunu (`CavityEstimator` üzerinden) ve trim ileri beslemesi için `VehicleModel.evaluate`'i kendi içinde çağırır; gerçek kavite durumuna yalnız `CavitySensors` üzerinden erişir.
 
 ## Durum (son commit itibarıyla)
 | Modül | Durum | Test |
@@ -18,10 +41,11 @@ Yapay süperkavitasyon oluşumu sırasında bir su altı aracının 6-DOF kineti
 | `src/validation/legacy_reference.py` | Altın referans | — |
 | `src/validation/sanity_checks.py` | **İskelet** — eski, hiçbir yerde kullanılmıyor (adım 5'te yeniden yazılacak) | — |
 | `src/control/autopilot.py` (`AxisPID`, `DepthHold`, `AttitudeAutopilot`), `estimator.py` (`CavityEstimator`), `sensors.py` (`CavitySensors`), `tuning.py` | Hazır; pitch+yaw, 1 ms, kanat etkinliği çizelgesi, trim ileri besleme, referans ön filtresi, pc + kuyruk gaz sensörlü tahminci, derinlik tutma | `test_autopilot.py` 60/60 |
-| Sürekli rejim geçişleri (`legacy_exact=False`, varsayılan): `hydrodynamics/smooth.py`, body/planing/cavity smooth dalları | Hazır | `test_continuity.py` 38/38 |
+| Sürekli rejim geçişleri (`legacy_exact=False`, varsayılan): `hydrodynamics/smooth.py`, body/planing/cavity smooth dalları | Hazır | `test_continuity.py` 39/39 |
 | `src/dynamics/model.py` (`VehicleModel.evaluate(t,x,u)→(ẋ,diag)`, `cavity_derivative`, `ControlInput`, `fin_mixer`) | Hazır; legacy Case 1 kuvvet/momentleriyle ≤%0.9; gaz debisi referans derinliği | `test_model.py` 111/111 |
 | `src/simulation/simulator.py` (RK4, ayrık kontrolcü ZOH, `EventObserver`, `locked_states`), `run_simulation.py` (CLI), `src/postprocess/plots.py`, `tables.py`, `configs/case1_config.py` | Hazır | `test_simulator.py` 18/18 |
 | `src/dynamics/blocks.py`: `Controller.update(t,x)→ControlInput`, `ScheduleController` | Hazır (eski iskelet sınıflar ve `configs/example_config.py` silindi) | — |
+| Kavite ekseni sapması → kanat ıslaklığı → K (roll): `fins.fin_wetted_segment`, `cavity.cavity_axis_offset_components`, `model.fin_wet_geometry` | Hazır (`fin_cavity_offset`, sürekli modelde açık) | `test_fin_offset.py` 34/34 |
 | `test_hydrodynamics_legacy.py` | **Başarısız** — yanlış geometri; `legacy_reference.py` ile değiştirilmeli | — |
 
 ## Sıradaki adımlar
@@ -43,7 +67,13 @@ Yapay süperkavitasyon oluşumu sırasında bir su altı aracının 6-DOF kineti
 - Kavite: `hydrodynamics/cavity.py::cavity_state_derivative` (legacy ODE formu). p∞ derinliği Z durumundan.
 - `fins_use_steady_cavity=True` legacy tuhaflığını (kanat ıslaklığı Lc_ss/Dc_ss ile) taklit eder; varsayılan False (gecikmeli durum). Regresyon testi True kullanır.
 - Kalan legacy farkı: legacy kanat kavite koordinatına sabit `+0.013 m` ekliyor, model `x_body_start` (cone=0) kullanıyor → t≥0.35'te kanat kuvvetinde ~%0.6-0.9 fark (doğrulandı: 0.013 ile birebir).
-- Basitleştirmeler: drag gövde ekseni boyunca; gövde ıslanması/planing kavite ekseni sapması sadece pitch düzleminde (yerçekimi + α_eff); kanat ıslaklığı sapmasız kavite yarıçapıyla. `x_cg_mass` yok sayılır (orijin = kütle merkezi).
+- **Kavite ekseni sapması → kanat ıslaklığı → K (roll momenti) (2026-10-06):** eş merkezli kavite varsayımında dört kanat aynı ıslaklığı görür ve roll katkıları birebir sönümlenir (**K ≡ 0**, doğrulandı: `fin_cavity_offset=False` iken |K| < 1e-9). Kavite gerçekte akış doğrultusunu izler → kesit merkezi gövde ekseninden (h_y, h_z) kayar (`cavity.cavity_axis_offset_components`, pitch + yaw bileşeni: h_z = k_dev·α_eff·x_open·(1−e^(−x/x_open)), h_y aynısı β ile) → her kanat farklı ıslanır → K doğar.
+  - `fins.fin_wetted_segment`: kanat ışınının kayık kavite çemberiyle kesişimi (ikinci derece denklem). Islak küme **iki parçalı** olabilir (kavite orta bandı örter, kök + uç suda). Kuvvet ıslak alanın merkezinde uygulanır (sabit veter) → `model.fin_wet_geometry` kanat başına (span, r_force) döndürür; h=0'da sonuç eski `fin_immersion_ratio` + legacy r_mid ile **bit düzeyinde** aynı.
+  - Simetri (testlerle sabit): pitch veya yaw **tek başına** roll üretmez; `α×δr`, `β×δe` çaprazları üretir ve bu ikisi zıt işaretli/eşit büyüklüktedir (pitch-yaw simetrisi). Kanat roll sönümü K_p ≈ −350 N·m·s/rad baskın.
+  - Kapalı çevrimde (`otopilot_derinlik`, 12 s): |φ|max **0.39°**, |p|max 5.5 °/s, |h_y|max 1.1 cm, |h_z|max 7.4 cm; V/Z/örtülme/θ yörüngesi sapma kapalı haliyle aynı → **roll kontrolü hâlâ gereksiz**. Otopilot testleri 60/60 değişmedi (tek uyarlama: ortalama eta 0.999 eşiğini ~90 ms erken geçiyor, `test_autopilot.py` penceresi 1.0 → 0.8 s).
+  - Tanılar: `fin_wet_spans` (4'lü), `cav_h_y`, `cav_h_z`. Tahminci (`estimator._wet_span`) aynı `fin_wet_geometry` yolunu kendi kavite tahmini + durumdan gelen α_eff/β ile kullanır (yeni sensör yok; kavite **durumu** yine yalnız tahmincidendir).
+  - Anahtarlar: `fin_cavity_offset` (None → `legacy_exact`'ten; sürekli modelde açık, legacy'de kapalı → legacy regresyonları birebir), `fin_cavity_offset_gravity` (**kapalı**, bkz. Bilinen sorunlar).
+- Basitleştirmeler: drag gövde ekseni boyunca; gövde ıslanması/planing kavite ekseni sapması sadece pitch düzleminde (yerçekimi + α_eff; kanat ıslaklığı iki bileşeni de kullanır). `x_cg_mass` yok sayılır (orijin = kütle merkezi).
 - **`legacy_exact` anahtarı:** `True` → legacy rejim anahtarlamaları birebir (TÜM legacy regresyon testleri bunu kullanır: `test_model`, `test_simulator` (B), `case1_kilitli` senaryosu). `False` (varsayılan, `case1_config.VEHICLE`) → sürekli geçişler. Legacy'de bulunan sıçramalar ve çözümleri:
   - Kavite oluşumu (Lc=0): legacy tam-ıslak dalında F_skin=0 (7.3 kN sıçrama) ve taban sürüklemesi 0.15·q·S ↔ 0 → kesit döngüsü her zaman çalışır; taban sürüklemesi transom kaplamasıyla harmanlanır.
   - Kesit kapanması: Logvinovich profili ucunda R→Rn sonra 0'a sıçrıyordu (40 basamak) → kapanma yarısında R² = (Rn² + (Rmax²−Rn²)S)·D, x→Lc'de R→0. Kalan: profil R ∝ √(Lc−x) dikey teğetli (sonsuz eğim, sürekli) — kavite ~5 cm iken ilk kesit mm ölçeğinde kapanır.
@@ -51,6 +81,11 @@ Yapay süperkavitasyon oluşumu sırasında bir su altı aracının 6-DOF kineti
   - Transom: kavite ucu transomu geçerken planing 0→660 N, δ=2R_v eşiği → `transom_forces_smooth` (kaplama ağırlığı smoothstep(rc_tail/R_v), çıkış harmanlaması δ/R_v ∈ [1.5, 2.5]).
   - σ=1: Lc_ss 1.3 m→0, Cx0(1+σ)→Cx0 (F_cav yarıya) → hedef boyutlar smoothstep((1−σ)/0.2) ile 0'a iner; Cx0·(1+min(σ,1)).
   - Sonuç: sürekli modelde Case 1 inception daha fazla sürükleme görür (legacy F_skin=0 hatası yok) → V daha çok düşer (0.7 s'de ~27 m/s), kavite daha uzar (~9 m).
+- **Tam ıslak (kavitasyon öncesi) rejim düzeltmeleri (2026-10-05, CFD kıyası):** CFD'den bu modele geçişte başlangıç koşulunda X kuvveti %33 yüksekti. Kaynak: süperkavitasyon korelasyonlarının kavite yokken uygulanması. İkisi de yalnız `legacy_exact=False` iken etkin (legacy regresyonları birebir korunur).
+  - **Burun direnci:** `Cx = Cx0·(1+σ)` (Reichardt) kavitatörün *arkasında kavite varken* geçerli (taban basıncı = pc; σ ≲ 0.3-0.5'te doğrulanmış) ve bu yasada gövdenin basınç direnci de kavitatöre yüklenir — yani gövde kavitenin **içindeyken**. t=0'da pc = p_buhar → σ = 0.973 → Cx = 0.446, 40° koninin tam ıslak basınç direncinin (0.20) iki katı. Çözüm: kuvvet için Cx, **kavite gövdeyi örtene kadar** `cavitator.wetted_cavitator_Cx`'te tutulur (Hoerner koni direnci tablosu, taban alanına göre; disk → 1.17) ve `smoothstep((Dc/D − 1)/w)`, `w = cavity_estab_width = 0.5` (`CAVITY_ESTAB_WIDTH`) ile Reichardt'a harmanlanır. Kavite **geometrisi** (x_open) için Cx değişmedi → `diag["Cx"]` eski, kuvvet `diag["Cx_force"]`, ağırlık `diag["cav_estab"]`. Config: `cavitator_Cx_wet` (None → geometriden), `cavity_estab_width`.
+    **Ölçüt σ DEĞİL kavite durumudur (2026-10-06 düzeltmesi):** ilk sürüm `smoothstep((1−σ)/SIGMA_ONSET_WIDTH)` kullanıyordu; σ hem hız arttıkça kavite yokken düşüyor (V₀ = 25 m/s'de t=0'da σ = 0.62 → düzeltme **hiç** devreye girmiyordu, X(0) = 10114 N) hem de havalandırma pc'yi yükseltince ms'ler içinde düşüyor (V₀ = 20 m/s'de 55 ms'de X 5534 → 6905 N, **+%25 geri sıçrama**). Dc/D ölçütüyle: X(0) 20 m/s'de 5457 N, 25 m/s'de 8435 N (−%17) ve ilk 0.5 s'deki en dik yükseliş 35.6 kN/s → 4.0 kN/s.
+  - **Sürtünme:** legacy sabit `Cf = 0.003` Re bağımsız ve bu araçta yüksek (L = 4 m, V = 20 m/s → Re = 6.9e7, ITTC-57 0.00220; V = 40'ta 0.00199). `body.skin_friction_ittc`: `Cf = (1+k)·0.075/(log10 Re − 2)²`, `form_factor` = 1.1 (Hoerner formu ~1.03 + ITTC pürüzlülük payı ~3e-4). `friction_model` `legacy_exact`'ten türetilir ("ittc"/"constant"), config ile ezilebilir.
+  - Sonuç (V₀ = 20 m/s, 10 m, kavite yok): toplam X **7479 → 5457 N** (oran 1.37); C_D(S_b) 0.516 → 0.376. Dağılım: burun 2870 → 1286, sürtünme 2261 → 1824, taban 2174 (değişmedi), kanat 174. V₀ = 25 m/s'de 10114 → 8435 N. Etki rejime özgü: burun düzeltmesi kavite gövdeyi örtünce (Dc > D, V₀=20'de t ≈ 0.3-0.6 s) kapanır, gövde tam örtüldükten sonra (t ≳ 1.2 s) sürtünme zaten ~0 → kararlı rejim ve kavite içi davranış **değişmedi** (V(12 s), örtülme, otopilot testleri 60/60 aynı).
 - **Gaz debisi referansı** (`gas_flow_ref_depth` [m], kullanıcı 2026-09-16: 5 m): Q o derinliğin hidrostatik basıncında (p_ref) hacim debisi; kavitede izotermal genleşir, Cq_eff = Cq·p_ref/pc. Cebirsel döngü denge basıncında kapalı formda çözülür: pc_t = p∞/(1 + ½ρV²·A_v/(Cq·p_ref)), σ_vent = A_v·pc_t/(Cq·p_ref) (`cavity_state_derivative(gas_p_ref=)`). None → legacy. Sonuç: derinlik arttıkça σ_vent artar (aynı debiyle kavite kısalır).
 - Legacy'ye uyum için hydrodynamics'e eklenenler: `cavity_state_derivative`, `fins.cavity_radius_ellipse`, `fin_lift_and_drag(span_for_AR=)`, `cavitator_lift_coefficient(cone_lift_gain=)`, `planing.transom_forces_legacy` (ρV², işaretli α_p — eski `planing_force_dzielski_kurdila` ½ρV² kullanıyor, legacy ile uyumsuz), `constants.CD_BASE_EXPOSED/FULLY_WET`.
 
@@ -91,8 +126,11 @@ t≈0.5 s sonucu: V=36.9, σ=0.15, Lc=4.19, Dc=0.52, pc=94173 · **Fd=5764.1 N**
 - ~~Kuvvet süreksizlikleri~~ → `legacy_exact=False` ile giderildi (bkz. Model kararları, `test_continuity.py`). `legacy_exact=True` modunda bilerek duruyor.
 - ~~Otopilot geçiş aşımı~~ → trim ileri beslemesiyle %1.1 (bkz. Otopilot kararları). Kalan: tahmincinin kavite boyu modeli hatasına (K_Lc) duyarlılığı (|Δeta| ≤ 0.24; kontrol hedefleri yine de karşılanıyor).
 - Gaz debisi derinliğe göre planlanmıyor: 125 L/s yalnız ~12 m'ye kadar tam örtülme sağlar (20 m için ≥215 L/s).
+- **Taban (transom) basınç sürüklemesi CFD'ye oturtulmadı:** `CD_BASE_FULLY_WET = 0.15` legacy'den geliyor ve tam ıslak başlangıçta toplam X'in **%39'u** (2174 N). Kullanıcı CFD'nin tabanı içerdiğini teyit etti ama sayısal veri yok. İtki jeti tabanı doldurursa bu terim belirgin düşer; config parametresi değil, sabit (kalibrasyonda — adım 5 — ilk aday).
+- Tam ıslak rejimden süperkavitasyona geçiş (0-1 s) CFD ile **doğrulanmadı**: yalnız t=0 noktası kıyaslandı. Geçişte iki belirgin olay var: (a) burun direncinin Reichardt'a harmanlanması (Dc/D ∈ [1, 1.5], ~0.3-0.5 s, V₀=20'de X'i %20 yükseltir — V₀=25'te tepe yok), (b) kavite transomu örtünce taban basınç sürüklemesinin sıfırlanması (V₀=20: 0.93-1.03 s'de X 6.6 → 3.2 kN, −%52, en dik eğim −72 kN/s). (b) fizikseldir (süperkavitasyonun kendisi) ama büyüklüğü tamamen `CD_BASE_FULLY_WET = 0.15`'e bağlıdır (aşağıya bakınız). `cavity_estab_width` kalibrasyon parametresidir (adım 5).
+- Tam ıslak düzeltmelerin dayanağı literatür katsayıları (Hoerner koni direnci, ITTC-57 + (1+k) = 1.1), CFD noktası **değil**: düzeltme eski değerin 1/1.352'sine iniyor, kullanıcının bildirdiği %33 fark ise 1/1.33 gerektiriyordu → yeni değer CFD'nin ima ettiği ~5623 N'un %1.6 altında. Bu sapma katsayı belirsizliğinin içinde; V'ye bağlı CFD eğrisi gelirse (1+k), Cx_wet ve CD_base doğrudan fit edilebilir (adım 5).
 - `src/hydrodynamics/constants.py::LEGACY_CASE_1` **yanlış geometri** (Dn=0.05, mass=100, L=2.0). Yukarıdaki değerlerle düzeltilmeli.
-- `cavity.cavity_axis_offset` docstring'i "h>0 = kavite aşağı", legacy yorumu "yukarı" (hesapta |h| kullanıldığı için sonucu etkilemiyor). V≤0.5 m/s'de legacy sapmayı 0 alır.
+- **Kavite yerçekimi sagının İŞARETİ çözülmedi** → kanat ıslaklığında kapalı (`fin_cavity_offset_gravity=False`). `cavity.cavity_axis_offset` docstring'i "h>0 = kavite aşağı", legacy yorumu "yukarı"; gövde ıslanması/planing yolları |h| kullandığı için bugüne dek sonucu etkilemedi. Kanat ıslaklığında işaret **belirleyici** (hangi kanat çifti ıslanır → roll yönü) ve terim baskın (x=3.8 m, V=30 m/s → 7.9 cm; aynı noktada 2° açı terimi 1.9 cm) → deney/CFD ile sabitlenmeden açılmamalı. V≤0.5 m/s'de legacy sapmayı 0 alır.
 - `cylinder_inertia` homojen silindir, geometrik merkez etrafında (CG 2.4 m, geometrik merkez 2.0 m); gerçek inertia config'den verilmeli.
 
 ## Agent ile çalışma

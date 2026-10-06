@@ -34,7 +34,7 @@ import numpy as np
 from .constants import (
     RHO, G, CF_SKIN, CDC_CROSSFLOW_SECTION, N_BODY_SECTIONS,
     CL_ALPHA_BODY_DEFAULT, CDC_BODY_DEFAULT, K_DEV_DEFAULT, BODY_VOLUME_CORRECTION,
-    ARC_FREE_BLEND,
+    ARC_FREE_BLEND, NU_WATER, FORM_FACTOR_DEFAULT, RE_MIN_FRICTION,
 )
 from .cavity import cavity_axis_offset
 from .smooth import smoothstep
@@ -43,6 +43,35 @@ from .smooth import smoothstep
 _V_AXIS_MIN = 0.5          # bu hızın altında kavite ekseni sapması 0 alınır
 _CAV_EXIST_MIN = 1e-4      # Lc, Dc bu değerin altında → kavite yok (tam ıslak)
 _ATTACHED_CLOSED_FRAC = 0.05
+
+
+# ============================================================================
+# SÜRTÜNME KATSAYISI
+# ============================================================================
+
+def skin_friction_ittc(V, L_ref, form_factor=FORM_FACTOR_DEFAULT):
+    """
+    ITTC-57 korelasyon hattı + form/pürüzlülük payı:  Cf = (1+k)·0.075/(log10(Re) − 2)²
+
+    Re = V·L_ref/ν (ν = NU_WATER ≈ 1.161e-6 m²/s, 15°C deniz suyu). Legacy sabit
+    Cf = 0.003 Re bağımsızdır ve bu araçta belirgin yüksektir: L = 4 m'de V = 20 m/s
+    (Re = 6.9e7) → ITTC 0.00220, V = 40 m/s (Re = 1.4e8) → 0.00199.
+
+    (1+k) hem gövde formunu (Hoerner, L/D ≈ 13 için ~1.03) hem pürüzlülük payını
+    (ITTC ΔCf ≈ 3e-4) kapsar; varsayılan 1.1. Re < RE_MIN_FRICTION'da formül
+    RE_MIN_FRICTION'da dondurulur (V → 0 koruması; q → 0 olduğu için kuvvet yine 0'a
+    sürekli iner).
+
+    Args:
+        V: Hız [m/s]
+        L_ref: Referans uzunluk (gövde boyu) [m]
+        form_factor: (1+k) form + pürüzlülük çarpanı
+
+    Returns:
+        Cf: Sürtünme katsayısı [-] (ıslak alana göre)
+    """
+    Re = max(abs(float(V)) * max(float(L_ref), 1e-6) / NU_WATER, RE_MIN_FRICTION)
+    return float(form_factor) * 0.075 / (np.log10(Re) - 2.0) ** 2
 
 
 # ============================================================================
@@ -219,6 +248,9 @@ def compute_body_forces(V, alpha, Lc, Dc, Cx, params):
             alpha_eff [rad] (verilirse delta_cav yok sayılır)
             k_dev, CL_alpha_body, Cdc_body, body_volume_correction
             Cf, n_x (opsiyonel; varsayılan constants.CF_SKIN, N_BODY_SECTIONS)
+            friction_model ("constant" varsayılan = legacy sabit Cf | "ittc" = Re bağımlı
+                ITTC-57 korelasyon hattı, form_factor = (1+k) ile; bkz. skin_friction_ittc)
+            form_factor (opsiyonel; varsayılan constants.FORM_FACTOR_DEFAULT = 1.1)
             smooth_transitions (bool, varsayılan False = legacy birebir):
                 True → kesit döngüsü kavite olmasa da çalışır (legacy tam-ıslak dalı
                 F_skin=0 hatası ve kavite oluşumundaki sıçrama yok), sürekli kapanma
@@ -233,6 +265,7 @@ def compute_body_forces(V, alpha, Lc, Dc, Cx, params):
                       kesit integrali Munk+Hoerner (legacy'de üzerine yazılan) /
                       kavite yoksa legacy tam-ıslak Munk+Allen-Perkins formülü
         F_buoy, M_buoy, V_submerged   Arşimet [N], [N·m], [m³]
+        Cf [-]        kullanılan sürtünme katsayısı (ITTC modelinde V'ye bağlı)
         wet_area [m²], wet_len [m], total_area [m²], cover [-], wet_frac [-]
         fully_wet (bool): kavite yok (Lc veya Dc < 1e-4) dalı kullanıldı
     """
@@ -247,7 +280,13 @@ def compute_body_forces(V, alpha, Lc, Dc, Cx, params):
     k_dev = max(0.0, min(float(_p(params, "k_dev", K_DEV_DEFAULT)), 1.0))
     CL_alpha_body = max(0.0, min(float(_p(params, "CL_alpha_body", CL_ALPHA_BODY_DEFAULT)), 6.28))
     body_vol_corr = bool(_p(params, "body_volume_correction", BODY_VOLUME_CORRECTION))
-    Cf = float(_p(params, "Cf", CF_SKIN))
+    # Sürtünme: "constant" → legacy sabit Cf (varsayılan, legacy_exact ile birebir),
+    # "ittc" → ITTC-57 Re bağımlı (model.py legacy_exact=False iken bunu geçirir)
+    if str(_p(params, "friction_model", "constant")).lower() == "ittc":
+        Cf = skin_friction_ittc(V, L_veh,
+                                form_factor=_p(params, "form_factor", FORM_FACTOR_DEFAULT))
+    else:
+        Cf = float(_p(params, "Cf", CF_SKIN))
     n_x = int(_p(params, "n_x", N_BODY_SECTIONS))
     smooth = bool(_p(params, "smooth_transitions", False))
 
@@ -350,6 +389,7 @@ def compute_body_forces(V, alpha, Lc, Dc, Cx, params):
     M_body_lift = (x_cg - L_veh / 2.0) * F_body_lift
 
     return {
+        "Cf": float(Cf),
         "F_skin": float(F_skin),
         "F_body_lift": float(F_body_lift),
         "F_body_drag": float(F_body_drag),

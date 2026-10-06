@@ -60,24 +60,37 @@ class CavityEstimator:
         self.Lc, self.Dc, self.pc = self.x0
         self.s_L = 1.0
         self.tail_gas_hat = False
-        self.wet_span = self._wet_span()
+        self.s_raw = 1.0          # son kavitasyon sayısı (x_open → kavite ekseni sapması)
+        self.wet_span = self._wet_span(0.0, 0.0, 0.0)
 
-    def _wet_span(self):
+    def _wet_span(self, alpha_eff, beta, V):
+        """
+        Kanat ıslak açıklığı (dört kanadın ortalaması) — modelle AYNI geometri yolundan
+        (`VehicleModel.fin_wet_geometry`). Kavite ekseni α_eff ve β ile gövde ekseninden
+        kayar; kanatlar farklı ıslanır. Ortalama alınır çünkü eta tek bir kazanç bölenidir
+        (kanat kuvveti ıslak açıklıkla doğrusal). Sapma kapalıysa eş merkezli değere düşer.
+
+        α_eff ve β yeni bir ölçüm gerektirmez: otopilot zaten tam duruma bakar (hız
+        bileşenleri + açık çevrim δc). Kavite DURUMU yine yalnız tahmincidendir.
+        """
         m = self.m
         if not m.fins_enabled or m.fin_span <= 1e-6:
             return 0.0
-        R_c = hfins.cavity_radius_ellipse(m.fin_x + m.x_body_start, self.Lc, self.Dc)
-        return hfins.fin_immersion_ratio(max(R_c, m.R_v_fin), m.R_v_fin, m.fin_span)
+        _, Cx = m.cavitator_Cx_geometry(self.s_raw, np.hypot(alpha_eff, beta))
+        spans, _, _, _ = m.fin_wet_geometry(self.Lc, self.Dc, alpha_eff, beta, V, Cx)
+        return float(spans.mean())
 
     @property
     def eta(self):
         """Kanat kontrol etkinliği (tam ıslak = 1)."""
         return self.wet_span / self.m.fin_span if self.m.fin_span > 0 else 0.0
 
-    def update(self, dt, V, depth, gas_flow, pc_meas=None, tail_gas=None):
+    def update(self, dt, V, depth, gas_flow, pc_meas=None, tail_gas=None,
+               alpha_eff=0.0, beta=0.0):
         if dt > 0.0:
             _, d = self.m.cavity_derivative(self.Lc, self.Dc, self.pc, max(V, V_FORCE_MIN),
                                             depth, gas_flow)
+            self.s_raw = d["sigma_raw"]
             tau = max(self.m.tau_cav, 1e-6)
             dLc = (self.s_L * d["Lc_ss"] - self.Lc) / tau
             dDc = d["dDc"]
@@ -92,5 +105,5 @@ class CavityEstimator:
             self.Lc = max(self.Lc + dt * dLc, 0.0)
             self.Dc = max(self.Dc + dt * dDc, 0.0)
             self.pc = self.pc + dt * dpc
-            self.wet_span = self._wet_span()
+            self.wet_span = self._wet_span(alpha_eff, beta, V)
         return self.eta
